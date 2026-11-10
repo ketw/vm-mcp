@@ -163,6 +163,7 @@ UPDATE_URL:   str = os.environ.get(
 PWSH:   str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 CMD:    str = r"C:\Windows\System32\cmd.exe"
 SCHTASKS: str = r"C:\Windows\System32\schtasks.exe"
+WINGET: str = r"C:\Users\User0\AppData\Local\Microsoft\WindowsApps\winget.exe"
 LOG_FILE: Path = Path(os.environ.get("VM_MCP_LOG", str(INSTALL_DIR / "vm-mcp.log")))
 
 # IP allowlist
@@ -282,7 +283,7 @@ def _run_ps(command: str, timeout: int = SHELL_TIMEOUT, elevated: bool = False) 
         subprocess.run(f'"{SCHTASKS}" /Run /TN "{task}"', shell=True, capture_output=True)
         time.sleep(min(timeout, 60))
         subprocess.run(f'"{SCHTASKS}" /Delete /TN "{task}" /F', shell=True, capture_output=True)
-        stdout = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
+        stdout = out.read_text(encoding="utf-8-sig", errors="replace") if out.exists() else ""
         script.unlink(missing_ok=True); out.unlink(missing_ok=True)
         return {"stdout": stdout.rstrip("\n"), "stderr": "", "exit_code": 0}
 
@@ -422,7 +423,7 @@ def winget_install(
     flags = ""
     if silent:          flags += " --silent"
     if accept_agreements: flags += " --accept-package-agreements --accept-source-agreements"
-    return _run_ps(f"winget install --id {package_id}{flags}", timeout=300)
+    return _run_ps(f"& '{WINGET}' install --id {package_id}{flags}", timeout=300)
 
 
 @mcp.tool()
@@ -436,7 +437,7 @@ def winget_search(query: str, limit: int = 20) -> dict:
 
     Returns: {results: [{id, name, version, source}], count}
     """
-    r = _run_ps(f"winget search '{query}' --accept-source-agreements 2>&1")
+    r = _run_ps(f"& '{WINGET}' search '{query}' --accept-source-agreements 2>&1")
     lines = [l for l in r["stdout"].splitlines() if l.strip() and "---" not in l]
     return {"raw": "\n".join(lines[:limit + 5]), "query": query}
 
@@ -451,7 +452,7 @@ def winget_list(filter_name: str = "") -> dict:
 
     Returns: {raw output}
     """
-    cmd = "winget list --accept-source-agreements"
+    cmd = f"& '{WINGET}' list --accept-source-agreements"
     if filter_name:
         cmd += f" --name '{filter_name}'"
     return _run_ps(cmd, timeout=60)
@@ -845,7 +846,7 @@ def screenshot(scale: float = 0.75, region: Optional[list[int]] = None) -> dict:
 
     Returns: {image_base64, width, height, size_bytes}
     """
-    # Primary: GDI screenshot via PowerShell (works in SYSTEM session, no pyautogui needed)
+    # Primary: GDI screenshot via PowerShell — output as base64 to avoid temp file lock
     ps_script = r"""
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 $screens = [System.Windows.Forms.Screen]::AllScreens
@@ -855,17 +856,19 @@ $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
 $g   = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
 $g.Dispose()
-$tmp = [System.IO.Path]::GetTempFileName() + '.png'
-$bmp.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
+$ms = New-Object System.IO.MemoryStream
+$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
 $bmp.Dispose()
-Write-Output $tmp
+$bytes = $ms.ToArray()
+$ms.Dispose()
+Write-Output ([Convert]::ToBase64String($bytes))
 """
-    r = _run_ps(ps_script)
-    img_path = r["stdout"].strip()
-    if img_path and Path(img_path).exists():
+    r = _run_ps(ps_script, timeout=15)
+    b64 = r["stdout"].strip()
+    if b64 and len(b64) > 100:
         from PIL import Image
-        img = Image.open(img_path)
-        Path(img_path).unlink(missing_ok=True)
+        data = base64.b64decode(b64)
+        img = Image.open(io.BytesIO(data))
         if region and len(region) == 4:
             img = img.crop((region[0], region[1], region[0]+region[2], region[1]+region[3]))
         if scale != 1.0:
@@ -894,7 +897,7 @@ Write-Output $tmp
             "format": "PNG", "size_bytes": len(data),
         }
     except Exception as e:
-        return {"error": f"screen grab failed: {e}", "ps_stderr": r.get("stderr", "")}
+        return {"error": f"screen grab failed: {e}", "ps_stderr": r.get("stderr", ""), "ps_stdout_len": len(b64)}
 
 
 @mcp.tool()
@@ -1019,10 +1022,10 @@ $notify = New-Object System.Windows.Forms.NotifyIcon
 $notify.Icon = [System.Drawing.SystemIcons]::Information
 $notify.Visible = $true
 $notify.ShowBalloonTip({duration * 1000}, '{title.replace("'","''")}', '{message.replace("'","''")}', [System.Windows.Forms.ToolTipIcon]::Info)
-Start-Sleep -Milliseconds {duration * 1000 + 500}
+Start-Sleep -Milliseconds 500
 $notify.Dispose()
 """
-    r = _run_ps(ps, timeout=duration + 5)
+    r = _run_ps(ps, timeout=max(duration + 3, 10))
     return {"shown": r["exit_code"] == 0, "stderr": r["stderr"]}
 
 
