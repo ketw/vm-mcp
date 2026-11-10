@@ -947,37 +947,34 @@ def keyboard_type(text: str, interval: float = 0.03) -> dict:
 
 
 @mcp.tool()
-def keyboard_hotkey(*keys: str) -> dict:
+def keyboard_hotkey(keys: str) -> dict:
     """
     Press a hotkey combination.
 
     Args:
-        *keys: Keys to press simultaneously, e.g. 'ctrl', 'c'
-               or pass as a single string like 'ctrl+alt+del'.
-
-    Examples:
-        keyboard_hotkey('ctrl', 'c')       → Ctrl+C
-        keyboard_hotkey('win', 'd')        → Show desktop
-        keyboard_hotkey('alt', 'F4')       → Close window
-        keyboard_hotkey('ctrl+shift+esc')  → Task Manager
+        keys: Keys to press, joined by '+'. Examples:
+              'ctrl+c'       -> Ctrl+C (copy)
+              'ctrl+shift+esc' -> Task Manager
+              'win+d'        -> Show desktop
+              'alt+F4'       -> Close window
+              'ctrl+alt+del' -> Security screen
 
     Returns: {sent, keys}
     """
-    if len(keys) == 1 and "+" in keys[0]:
-        keys = tuple(keys[0].split("+"))
+    key_list = [k.strip() for k in keys.split("+") if k.strip()]
     try:
         pag = _pyautogui()
-        pag.hotkey(*keys)
-        return {"sent": True, "keys": list(keys)}
+        pag.hotkey(*key_list)
+        return {"sent": True, "keys": key_list}
     except Exception as e:
         # Fallback: SendKeys
-        key_map = {"ctrl": "^", "alt": "%", "shift": "+", "win": "^{ESC}"}
-        combo = "".join(key_map.get(k.lower(), k) for k in keys)
+        key_map = {"ctrl": "^", "alt": "%", "shift": "+"}
+        combo = "".join(key_map.get(k.lower(), k) for k in key_list)
         r = _run_ps(
             f"Add-Type -AssemblyName System.Windows.Forms; "
             f"[System.Windows.Forms.SendKeys]::SendWait('{combo}')"
         )
-        return {"sent": r["exit_code"] == 0, "keys": list(keys)}
+        return {"sent": r["exit_code"] == 0, "keys": key_list}
 
 
 @mcp.tool()
