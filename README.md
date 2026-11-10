@@ -1,159 +1,227 @@
-# vm-mcp — Remote Windows VM Control via MCP
+# vm-mcp — Remote Windows VM Control via MCP  `v2.0`
 
-A Python MCP server that runs on your Windows VM and exposes it as a set of
-tools Kiro CLI (or any MCP client) can call from anywhere over the internet.
+A Python MCP server that runs on your Windows VM and exposes it as a rich set
+of tools Kiro CLI (or any MCP client) can call from anywhere over the internet.
 
 ```
-┌─────────────────────────────┐         ┌──────────────────────────────┐
-│   Your machine (Kiro CLI)   │         │   Windows VM                 │
-│                             │  HTTPS  │                              │
-│  mcp.json → vm-mcp ─────────┼────────▶│  server.py (port 8765)       │
-│                             │  SSE    │  ├─ shell_run                │
-│  "run this command on VM"   │         │  ├─ file_read / file_write   │
-│  "install this on VM"       │         │  ├─ screenshot               │
-│  "take a screenshot"        │         │  ├─ service_control          │
-│  "read this registry key"   │         │  ├─ install_msi              │
-└─────────────────────────────┘         │  └─ ... 18 tools total       │
-                                        └──────────────────────────────┘
+┌─────────────────────────────┐         ┌──────────────────────────────────┐
+│   Your machine (Kiro CLI)   │  HTTPS  │   Windows VM (vm-mcp server)     │
+│                             │  SSE    │                                  │
+│  mcp.json → vm-mcp ─────────┼────────▶│  40 tools over HTTP/SSE          │
+│                             │         │  ├─ Shell (run, elevated, bg)    │
+│  "run nemo status on VM"    │         │  ├─ Files (read/write/hash/zip)  │
+│  "take a screenshot"        │         │  ├─ Processes (list/start/kill)  │
+│  "install this .exe"        │         │  ├─ UI (screenshot/mouse/keys)   │
+│  "read the registry"        │         │  ├─ Registry (read/write/list)   │
+│  "port-scan 192.168.1.x"    │         │  ├─ Services (list/start/stop)   │
+│  "update the server itself" │         │  ├─ Network (ping/scan/firewall) │
+└─────────────────────────────┘         │  └─ Self-update + restart        │
+                                        └──────────────────────────────────┘
 ```
 
 ---
 
-## Quick Start (5 minutes)
+## Quick Start
 
-### On the VM
+### On the VM (run as Administrator)
 
 ```powershell
-# 1. Copy vm-mcp folder to the VM (shared folder or file transfer)
-# 2. Open elevated PowerShell, navigate to the vm-mcp folder
 Set-ExecutionPolicy Bypass -Scope Process
-
-# 3. Run the installer
 .\install.ps1
 ```
 
-The installer will:
-- Install Python if not present (via winget)
-- Install all Python dependencies
-- Generate a random API key
-- Register vm-mcp as a Windows service (auto-starts on boot)
-- Open firewall port 8765
+> **Behind NAT** (VMware Workstation default)? Run `.\tunnel.ps1` for a free public URL.
 
-> **If the VM is behind NAT** (VMware Workstation default, home router): run
-> `.\tunnel.ps1` after install to get a free public HTTPS URL via ngrok.
+### Add to Kiro CLI
 
-### On your machine (Kiro CLI)
-
-Add to `~/.kiro/settings/mcp.json`:
-
+`~/.kiro/settings/mcp.json`:
 ```json
 {
   "mcpServers": {
     "vm-mcp": {
-      "url": "http://<VM-PUBLIC-IP>:8765/sse",
-      "headers": {
-        "X-Api-Key": "<your-api-key-from-install>"
-      }
+      "url": "http://<VM-IP>:8765/sse",
+      "headers": { "X-Api-Key": "<key-from-install>" }
     }
   }
 }
 ```
 
-If you used ngrok, the URL will be `https://<random>.ngrok-free.app/sse`.
-
 ---
 
-## Tools Reference
+## Tools — All 40
 
+### Shell & Execution
 | Tool | Description |
 |------|-------------|
-| `shell_run` | Run a PowerShell command; returns stdout/stderr/exit_code |
-| `shell_run_elevated` | Run as SYSTEM via scheduled task (for bcdedit, driver ops) |
-| `file_read` | Read a file (text or base64 binary) |
-| `file_write` | Write / create a file (text or base64 binary) |
-| `file_delete` | Delete a file or directory |
-| `file_list` | List directory contents with metadata |
-| `process_list` | List running processes (filterable by name) |
-| `process_kill` | Kill a process by PID or name |
-| `screenshot` | Capture desktop as base64-encoded PNG |
+| `shell_run` | Run PowerShell → stdout / stderr / exit_code |
+| `shell_run_elevated` | Run as SYSTEM via scheduled-task (bcdedit, driver ops) |
+| `shell_run_bg` | Fire-and-forget background process (no wait) |
+| `winget_install` | Install software via winget package manager |
+| `winget_search` | Search the winget catalogue |
+| `winget_list` | List installed packages |
+
+### File System
+| Tool | Description |
+|------|-------------|
+| `file_read` | Read file (text or base64 binary) |
+| `file_write` | Write / create file (text or base64 binary) |
+| `file_delete` | Delete file or directory |
+| `file_list` | List directory (recursive, glob pattern) |
+| `file_copy` | Copy file or directory tree |
+| `file_move` | Move / rename file or directory |
+| `file_hash` | SHA256 / MD5 / SHA1 hash of a file |
+| `archive_create` | Zip or tar.gz files/directories |
+| `archive_extract` | Extract zip / tar / 7z archive |
+
+### Processes
+| Tool | Description |
+|------|-------------|
+| `process_list` | List processes (sortable by memory, CPU, name, pid) |
+| `process_start` | Launch a new process |
+| `process_kill` | Kill process by PID or name |
+
+### UI & Desktop
+| Tool | Description |
+|------|-------------|
+| `screenshot` | Capture desktop (or region) as base64 PNG |
+| `mouse_move` | Move mouse to screen coordinates |
+| `mouse_click` | Left / right / double click at x,y |
+| `keyboard_type` | Type a string with simulated keystrokes |
+| `keyboard_hotkey` | Send hotkey: ctrl+c, win+d, alt+F4, etc. |
+| `toast_notify` | Show Windows toast notification on the VM |
+
+### Clipboard
+| Tool | Description |
+|------|-------------|
 | `clipboard_get` | Read clipboard text |
-| `clipboard_set` | Write text to clipboard |
-| `registry_read` | Read a registry key value |
-| `registry_write` | Write a registry key value |
-| `service_status` | Get Windows service status |
-| `service_control` | Start / stop / restart a service |
-| `download_file` | Download a URL to the VM filesystem |
-| `install_msi` | Download and install an MSI/EXE silently |
-| `vm_info` | OS, hostname, IPs, RAM, disk, uptime |
-| `reboot` | Schedule a VM reboot (with delay) |
-| `reboot_cancel` | Cancel a pending reboot |
+| `clipboard_set` | Write clipboard text |
+
+### Registry
+| Tool | Description |
+|------|-------------|
+| `registry_read` | Read a value |
+| `registry_write` | Write a value (REG_SZ/DWORD/QWORD/BINARY/MULTI_SZ) |
+| `registry_delete` | Delete a value or entire key |
+| `registry_list` | List subkeys and values in a key |
+
+### Windows Services
+| Tool | Description |
+|------|-------------|
+| `service_status` | Get single service status |
+| `service_control` | Start / stop / restart / pause / resume |
+| `service_list` | List all services (filterable by name and status) |
+
+### Networking
+| Tool | Description |
+|------|-------------|
+| `net_info` | Adapters, IPs, gateway, DNS, public IP |
+| `net_ping` | Ping a host, return latency stats |
+| `net_port_scan` | TCP port scan on a host |
+| `net_connections` | Active TCP connections (filterable by state) |
+| `firewall_rule_list` | List Windows Firewall rules |
+| `firewall_rule_add` | Add a firewall rule |
+| `firewall_rule_remove` | Remove a firewall rule by name |
+
+### System
+| Tool | Description |
+|------|-------------|
+| `vm_info` | OS, CPU, RAM, disk, uptime, public IP |
+| `event_log_read` | Read Windows Event Log (System/Application/Security) |
+| `scheduled_task_list` | List scheduled tasks |
+| `scheduled_task_run` | Run a scheduled task immediately |
+| `env_get` | Read an environment variable |
+| `env_set` | Set / delete a system environment variable |
+| `installed_drivers` | List installed kernel-mode drivers |
+
+### Software
+| Tool | Description |
+|------|-------------|
+| `download_file` | Download URL to local path |
+| `install_msi` | Install MSI / EXE silently (URL or local) |
+
+### Server Self-Management
+| Tool | Description |
+|------|-------------|
+| `server_version` | Current version, path, PID, uptime |
+| `server_update` | Fetch latest server.py from GitHub and replace |
+| `server_restart` | Re-exec the server process (applies update) |
+| `server_log_tail` | Tail the server log file |
+
+### Power
+| Tool | Description |
+|------|-------------|
+| `reboot` | Schedule VM reboot (with delay) |
+| `reboot_cancel` | Cancel pending reboot |
+| `shutdown` | Schedule VM shutdown |
 
 ---
 
-## Example Kiro CLI Interactions
+## Self-Update
 
-Once connected, you can tell Kiro things like:
+The server can update itself without touching the VM:
 
 ```
-"Take a screenshot of the VM and show me what's on the desktop"
-→ screenshot()
+# From Kiro CLI — one-shot update + restart:
+server_update(restart=True)
 
-"Install NemoSetup-1.0.0.exe from C:\Users\User\Desktop on the VM"
-→ shell_run("C:\\Users\\User\\Desktop\\NemoSetup-1.0.0.exe /quiet /norestart")
-
-"Check if NemoSvc is running on the VM"
-→ service_status("NemoSvc")
-
-"Start NemoSvc on the VM"
-→ service_control("NemoSvc", "start")
-
-"Run nemo status on the VM"
-→ shell_run("nemo status")
-
-"Read the Nemo boot policy registry key"
-→ registry_read("HKLM\\SYSTEM\\CurrentControlSet\\Services\\NemoKmd\\BootPolicy")
-
-"Download the latest Nemo installer to the VM and install it"
-→ download_file("https://...", "C:\\Temp\\NemoSetup.exe")
-→ install_msi("C:\\Temp\\NemoSetup.exe", is_url=False)
-
-"Show me disk space on the VM"
-→ vm_info()
-
-"Reboot the VM in 30 seconds"
-→ reboot(delay_seconds=30)
+# Or two steps:
+server_update()           ← downloads new server.py
+server_restart()          ← re-execs the process with new code
 ```
+
+The update URL defaults to:
+```
+https://raw.githubusercontent.com/ketw/vm-mcp/master/src/server.py
+```
+Override it by setting `VM_MCP_UPDATE_URL` on the VM before install.
 
 ---
 
 ## Security
 
-- Every request requires the `X-Api-Key` header matching `VM_MCP_API_KEY`
-- Optional IP allowlist: set `VM_MCP_ALLOWED_IPS=1.2.3.4,10.0.0.0/8` to restrict by IP
-- Keep the API key secret — it gives full shell access to the VM
-- Use ngrok or a VPN for the network path rather than exposing port 8765 directly
-- The server runs as SYSTEM (service) so it has full machine access
+| Feature | Detail |
+|---------|--------|
+| API key | `X-Api-Key` header on every request (set via `VM_MCP_API_KEY`) |
+| IP allowlist | `VM_MCP_ALLOWED_IPS=1.2.3.4,10.0.0.0/8` (optional) |
+| Rate limit | `VM_MCP_RATE_LIMIT=60` requests/minute per IP (0 = off) |
+| Health probe | `/health` and `/ping` require no auth |
 
 ---
 
 ## Network Options
 
-### Option A: Port forwarding (physical machine / static IP)
-Forward TCP port 8765 on your router/firewall to the VM's local IP.
-Use `http://<public-ip>:8765/sse` in mcp.json.
+| Option | Setup |
+|--------|-------|
+| Port forwarding | Forward TCP 8765 on router → VM local IP |
+| **ngrok** (recommended for VMware NAT) | `.\tunnel.ps1 -AuthToken <token>` |
+| Tailscale (best persistent) | Install Tailscale on both machines, use Tailscale IP |
+| ZeroTier | Similar to Tailscale |
 
-### Option B: ngrok tunnel (recommended for VMware NAT / dynamic IP)
-```powershell
-.\tunnel.ps1 -AuthToken <your-ngrok-token>
-```
-Free ngrok account: https://dashboard.ngrok.com
+---
 
-### Option C: Tailscale / ZeroTier (best for persistent access)
-Install Tailscale on both the VM and your machine. Use the VM's Tailscale IP:
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VM_MCP_API_KEY` | *(required)* | Secret API key |
+| `VM_MCP_PORT` | `8765` | Listening port |
+| `VM_MCP_HOST` | `0.0.0.0` | Bind address |
+| `VM_MCP_SHELL_TIMEOUT` | `120` | Default shell timeout (seconds) |
+| `VM_MCP_ALLOWED_IPS` | *(all)* | Comma-separated IP/CIDR allowlist |
+| `VM_MCP_RATE_LIMIT` | `0` | Max requests/minute per IP (0=off) |
+| `VM_MCP_UPDATE_URL` | GitHub raw URL | URL for server_update() |
+| `VM_MCP_LOG` | `<install_dir>/vm-mcp.log` | Log file path |
+
+---
+
+## Manual Run
+
 ```powershell
-winget install Tailscale.Tailscale
+cd vm-mcp\src
+pip install -r requirements.txt
+$env:VM_MCP_API_KEY = "my-secret-key"
+python server.py
 ```
-Then use `http://<tailscale-ip>:8765/sse` — works with no port forwarding, no ngrok.
 
 ---
 
@@ -162,37 +230,10 @@ Then use `http://<tailscale-ip>:8765/sse` — works with no port forwarding, no 
 ```
 vm-mcp/
 ├── src/
-│   ├── server.py          ← MCP server (the actual code)
+│   ├── server.py          ← MCP server (40 tools)
 │   └── requirements.txt   ← Python dependencies
 ├── install.ps1            ← One-shot installer (run on VM as admin)
-├── tunnel.ps1             ← ngrok tunnel launcher
-├── uninstall.ps1          ← Full removal script
+├── tunnel.ps1             ← ngrok tunnel for VMs behind NAT
+├── uninstall.ps1          ← Full removal
 └── README.md              ← This file
 ```
-
----
-
-## Manual Run (without installing as service)
-
-```powershell
-cd vm-mcp\src
-pip install -r requirements.txt
-$env:VM_MCP_API_KEY = "my-secret-key-here"
-$env:VM_MCP_PORT    = "8765"
-python server.py
-```
-
----
-
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| `VM_MCP_API_KEY not set` | Set the env var before starting: `$env:VM_MCP_API_KEY = "..."` |
-| Connection refused | Check firewall: `Get-NetFirewallRule -DisplayName "VmMcpServer"` |
-| 401 Unauthorized | Wrong API key in mcp.json `headers` |
-| 403 Forbidden | Your IP not in `VM_MCP_ALLOWED_IPS` |
-| Service won't start | Check log: `Get-Content C:\VmMcp\vm-mcp-err.log -Tail 20` |
-| Can't connect from internet | VM is behind NAT — use `tunnel.ps1` or port forward |
-| `Import error: PIL` | `pip install Pillow` on the VM |
-| `Import error: psutil` | `pip install psutil` on the VM |
