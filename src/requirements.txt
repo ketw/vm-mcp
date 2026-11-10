@@ -1,5 +1,5 @@
 # vm-mcp server dependencies
-# Install with:  pip install -r requirements.txt
+# Install with:  pip install -r requirements.txt --prefer-binary
 
 # Core MCP framework + HTTP server
 fastmcp>=2.3.0
@@ -18,3 +18,8 @@ psutil>=6.0.0
 
 # Windows-specific
 pywin32>=306             # winreg access on older Pythons; also COM support
+
+# pyyaml: required by fastmcp as a transitive dep. Pin to a range that has
+# pre-built wheels on PyPI so we never need to compile from source.
+# Always install with --prefer-binary to avoid C extension build failures.
+pyyaml>=6.0

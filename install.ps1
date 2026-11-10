@@ -62,9 +62,22 @@ Write-Host "  Copied." -ForegroundColor Green
 Write-Host "[3/7] Installing Python dependencies..." -ForegroundColor Yellow
 
 & python -m pip install --upgrade pip --quiet
-& python -m pip install -r "$INSTALL_DIR\requirements.txt"
+
+# pyyaml is a transitive dep of fastmcp and requires C build tools to compile
+# from source on Python 3.13+. Install a pre-built binary wheel first so pip
+# never attempts to build it. --prefer-binary tells pip to always pick a wheel
+# over an sdist for every package, avoiding all source-build failures.
+Write-Host "  Pre-installing pyyaml binary wheel..." -ForegroundColor Gray
+& python -m pip install "pyyaml>=6.0" --prefer-binary --quiet
+
+& python -m pip install -r "$INSTALL_DIR\requirements.txt" --prefer-binary
 if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
     Write-Host "ERROR: pip install failed." -ForegroundColor Red
+    Write-Host "  If you see a C++ build error, make sure no package is trying" -ForegroundColor Yellow
+    Write-Host "  to compile from source. The --prefer-binary flag should prevent" -ForegroundColor Yellow
+    Write-Host "  this, but some packages may not have wheels for Python $pyVer." -ForegroundColor Yellow
+    Write-Host "  Try: python -m pip install -r C:\VmMcp\requirements.txt --prefer-binary" -ForegroundColor Yellow
     exit 1
 }
 
