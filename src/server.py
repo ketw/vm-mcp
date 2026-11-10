@@ -163,7 +163,33 @@ UPDATE_URL:   str = os.environ.get(
 PWSH:   str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 CMD:    str = r"C:\Windows\System32\cmd.exe"
 SCHTASKS: str = r"C:\Windows\System32\schtasks.exe"
-WINGET: str = r"C:\Users\User0\AppData\Local\Microsoft\WindowsApps\winget.exe"
+WINGET: str = ""  # Resolved dynamically — WindowsApps alias can't be used by SYSTEM
+
+def _winget_path() -> str:
+    """Find the real winget.exe path (not the WindowsApps Store alias)."""
+    global WINGET
+    if WINGET and Path(WINGET).exists():
+        return WINGET
+    # Try to resolve via Get-AppxPackage
+    r = _run_ps(
+        "(Get-AppxPackage Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue).InstallLocation",
+        timeout=10,
+    )
+    install_loc = r["stdout"].strip()
+    if install_loc:
+        candidate = Path(install_loc) / "winget.exe"
+        if candidate.exists():
+            WINGET = str(candidate)
+            return WINGET
+    # Fallback: search common locations
+    for p in [
+        r"C:\Users\User0\AppData\Local\Microsoft\WindowsApps\winget.exe",
+        r"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.0.0.0_x64__8wekyb3d8bbwe\winget.exe",
+    ]:
+        if Path(p).exists():
+            WINGET = p
+            return WINGET
+    return ""
 LOG_FILE: Path = Path(os.environ.get("VM_MCP_LOG", str(INSTALL_DIR / "vm-mcp.log")))
 
 # IP allowlist
@@ -271,7 +297,7 @@ def _run_ps(command: str, timeout: int = SHELL_TIMEOUT, elevated: bool = False) 
         out    = Path(tempfile.mktemp(suffix=".txt"))
         script.write_text(
             f"$ErrorActionPreference='Continue'\n[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n{command}\n"
-            f'$LASTEXITCODE | Out-File "{out}" -Append',
+            f'$LASTEXITCODE | Out-File "{out}" -Encoding utf8 -Append',
             encoding="utf-8-sig",
         )
         subprocess.run(
@@ -423,7 +449,10 @@ def winget_install(
     flags = ""
     if silent:          flags += " --silent"
     if accept_agreements: flags += " --accept-package-agreements --accept-source-agreements"
-    return _run_ps(f"& '{WINGET}' install --id {package_id}{flags}", timeout=300)
+    wg = _winget_path()
+    if not wg:
+        return {"error": "winget.exe not found. Install App Installer from Microsoft Store.", "stdout": "", "exit_code": 1}
+    return _run_ps(f"& '{wg}' install --id {package_id}{flags}", timeout=300)
 
 
 @mcp.tool()
@@ -437,7 +466,10 @@ def winget_search(query: str, limit: int = 20) -> dict:
 
     Returns: {results: [{id, name, version, source}], count}
     """
-    r = _run_ps(f"& '{WINGET}' search '{query}' --accept-source-agreements 2>&1")
+    wg = _winget_path()
+    if not wg:
+        return {"error": "winget.exe not found", "query": query}
+    r = _run_ps(f"& '{wg}' search '{query}' --accept-source-agreements 2>&1")
     lines = [l for l in r["stdout"].splitlines() if l.strip() and "---" not in l]
     return {"raw": "\n".join(lines[:limit + 5]), "query": query}
 
@@ -452,7 +484,10 @@ def winget_list(filter_name: str = "") -> dict:
 
     Returns: {raw output}
     """
-    cmd = f"& '{WINGET}' list --accept-source-agreements"
+    wg = _winget_path()
+    if not wg:
+        return {"error": "winget.exe not found", "stdout": "", "exit_code": 1}
+    cmd = f"& '{wg}' list --accept-source-agreements"
     if filter_name:
         cmd += f" --name '{filter_name}'"
     return _run_ps(cmd, timeout=60)
