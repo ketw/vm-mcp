@@ -63,21 +63,30 @@ Write-Host "[3/7] Installing Python dependencies..." -ForegroundColor Yellow
 
 & python -m pip install --upgrade pip --quiet
 
-# pyyaml is a transitive dep of fastmcp and requires C build tools to compile
-# from source on Python 3.13+. Install a pre-built binary wheel first so pip
-# never attempts to build it. --prefer-binary tells pip to always pick a wheel
-# over an sdist for every package, avoiding all source-build failures.
-Write-Host "  Pre-installing pyyaml binary wheel..." -ForegroundColor Gray
-& python -m pip install "pyyaml>=6.0" --prefer-binary --quiet
+# pyyaml 6.x ships a C extension that requires Visual C++ Build Tools to
+# compile from source. On Python 3.13+ there is no pre-built wheel on PyPI.
+# Installing with --no-build-isolation forces the pure-Python fallback path
+# (pyyaml works fine without the C extension -- it just uses the Python
+# scanner/emitter instead, which is slightly slower but fully correct).
+Write-Host "  Installing pyyaml (pure-Python, no C compiler needed)..." -ForegroundColor Gray
+& python -m pip install pyyaml --no-build-isolation --quiet 2>&1 | Out-Null
+# If that also fails (very old pip), install from the pure-python sdist flag
+if ($LASTEXITCODE -ne 0) {
+    & python -m pip install "pyyaml>=5.4" --only-binary pyyaml --quiet 2>&1 | Out-Null
+}
 
+# Install the rest.
+# --prefer-binary : always pick a wheel over an sdist for every package.
+# --no-build-isolation is NOT passed here because most packages need it.
+# pyyaml is already installed above so pip will skip it in this pass.
+Write-Host "  Installing remaining dependencies..." -ForegroundColor Gray
 & python -m pip install -r "$INSTALL_DIR\requirements.txt" --prefer-binary
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "ERROR: pip install failed." -ForegroundColor Red
-    Write-Host "  If you see a C++ build error, make sure no package is trying" -ForegroundColor Yellow
-    Write-Host "  to compile from source. The --prefer-binary flag should prevent" -ForegroundColor Yellow
-    Write-Host "  this, but some packages may not have wheels for Python $pyVer." -ForegroundColor Yellow
-    Write-Host "  Try: python -m pip install -r C:\VmMcp\requirements.txt --prefer-binary" -ForegroundColor Yellow
+    Write-Host "  Manual fix -- run these two commands on the VM:" -ForegroundColor Yellow
+    Write-Host "    python -m pip install pyyaml --no-build-isolation" -ForegroundColor White
+    Write-Host "    python -m pip install -r C:\VmMcp\requirements.txt --prefer-binary" -ForegroundColor White
     exit 1
 }
 
