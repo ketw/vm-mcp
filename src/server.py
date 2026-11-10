@@ -1832,11 +1832,18 @@ def main():
         middleware=[Middleware(AuthMiddleware)],
     )
 
-    # Count registered tools (fastmcp 4.x public API)
-    try:
-        tool_count = len(mcp.list_tools())
-    except Exception:
-        tool_count = "?"
+    # Count registered tools — count @mcp.tool() decorators at module level
+    import inspect, sys
+    tool_count = sum(
+        1 for name, obj in inspect.getmembers(sys.modules[__name__])
+        if callable(obj) and getattr(obj, "_mcp_tool", None) is not None
+    )
+    if tool_count == 0:
+        # fallback: grep own source for @mcp.tool()
+        try:
+            tool_count = open(__file__).read().count("@mcp.tool()")
+        except Exception:
+            tool_count = "?"
 
     print(f"""
 ╔══════════════════════════════════════════════════════════╗

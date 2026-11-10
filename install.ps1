@@ -214,10 +214,10 @@ if ($nssmPath) {
     & nssm install $SERVICE_NAME $pythonExe "$INSTALL_DIR\server.py"
     & nssm set $SERVICE_NAME AppDirectory $INSTALL_DIR
 
-    # Set environment variables one at a time (no line continuation needed)
-    & nssm set $SERVICE_NAME AppEnvironmentExtra "VM_MCP_API_KEY=$API_KEY"
-    & nssm set $SERVICE_NAME AppEnvironmentExtra "VM_MCP_PORT=$PORT"
-    & nssm set $SERVICE_NAME AppEnvironmentExtra "VM_MCP_HOST=0.0.0.0"
+    # Set ALL environment variables in a single AppEnvironmentExtra call.
+    # NSSM replaces the entire block on each call, so separate calls overwrite each other.
+    $envBlock = "VM_MCP_API_KEY=$API_KEY`nVM_MCP_PORT=$PORT`nVM_MCP_HOST=0.0.0.0"
+    & nssm set $SERVICE_NAME AppEnvironmentExtra $envBlock
 
     & nssm set $SERVICE_NAME AppStdout "$INSTALL_DIR\vm-mcp.log"
     & nssm set $SERVICE_NAME AppStderr "$INSTALL_DIR\vm-mcp-err.log"

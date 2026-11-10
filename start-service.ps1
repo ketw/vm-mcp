@@ -33,12 +33,11 @@ $apiKey = [System.Environment]::GetEnvironmentVariable("VM_MCP_API_KEY", "Machin
 $port   = [System.Environment]::GetEnvironmentVariable("VM_MCP_PORT",    "Machine")
 if (-not $port) { $port = "8765" }
 
-# Re-apply environment to the NSSM service registration
+# Re-apply environment to the NSSM service registration (single call — multiple calls overwrite each other)
 $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
 if ($nssmCmd) {
-    & nssm set $SERVICE_NAME AppEnvironmentExtra "VM_MCP_API_KEY=$apiKey" 2>$null
-    & nssm set $SERVICE_NAME AppEnvironmentExtra "VM_MCP_PORT=$port"      2>$null
-    & nssm set $SERVICE_NAME AppEnvironmentExtra "VM_MCP_HOST=0.0.0.0"   2>$null
+    $envBlock = "VM_MCP_API_KEY=$apiKey`nVM_MCP_PORT=$port`nVM_MCP_HOST=0.0.0.0"
+    & nssm set $SERVICE_NAME AppEnvironmentExtra $envBlock 2>$null
 }
 
 # 4. Start the service
