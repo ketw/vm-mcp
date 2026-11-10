@@ -1832,8 +1832,11 @@ def main():
         middleware=[Middleware(AuthMiddleware)],
     )
 
-    # Count registered tools
-    tool_count = len([k for k in mcp._tool_manager._tools])
+    # Count registered tools (fastmcp 4.x public API)
+    try:
+        tool_count = len(mcp.list_tools())
+    except Exception:
+        tool_count = "?"
 
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
