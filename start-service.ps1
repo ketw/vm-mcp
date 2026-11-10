@@ -11,8 +11,36 @@ $INSTALL_DIR  = "C:\VmMcp"
 Write-Host "vm-mcp service startup fix" -ForegroundColor Cyan
 Write-Host ""
 
-# Resolve python exe and env vars
-$pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+# Resolve python exe — avoid the Windows Store stub in WindowsApps
+# Try known real install paths first, then fall back to Get-Command
+$pythonExe = $null
+$candidatePaths = @(
+    "C:\Users\User0\AppData\Local\Python\pythoncore-3.15-64\python.exe",
+    "C:\Python315\python.exe",
+    "C:\Python313\python.exe",
+    "C:\Python312\python.exe",
+    "C:\Python311\python.exe",
+    "C:\Python310\python.exe",
+    "C:\Python39\python.exe",
+    "C:\Program Files\Python313\python.exe",
+    "C:\Program Files\Python312\python.exe",
+    "C:\Program Files\Python311\python.exe",
+    "C:\Program Files\Python310\python.exe"
+)
+foreach ($p in $candidatePaths) {
+    if (Test-Path $p) { $pythonExe = $p; break }
+}
+if (-not $pythonExe) {
+    # Last resort: scan LocalAppData for pythoncore installs
+    $found = Get-ChildItem "$env:LOCALAPPDATA\Python" -Filter "python.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) { $pythonExe = $found.FullName }
+}
+if (-not $pythonExe) {
+    # Fall back to Get-Command but skip the Store stub
+    $cmd = Get-Command python -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike "*WindowsApps*" } | Select-Object -First 1
+    if ($cmd) { $pythonExe = $cmd.Source }
+}
+Write-Host "  Python: $pythonExe" -ForegroundColor Gray
 $apiKey    = [System.Environment]::GetEnvironmentVariable("VM_MCP_API_KEY", "Machine")
 $port      = [System.Environment]::GetEnvironmentVariable("VM_MCP_PORT",    "Machine")
 if (-not $port) { $port = "8765" }

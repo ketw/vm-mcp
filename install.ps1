@@ -160,7 +160,30 @@ Write-Host "  API key saved to system environment." -ForegroundColor Green
 # ---------------------------------------------------------------------------
 Write-Host "[5/7] Creating service startup script..." -ForegroundColor Yellow
 
-$pythonExe = (Get-Command python).Source
+# Resolve real Python path — skip Windows Store stub
+$pythonExe = $null
+$candidatePaths = @(
+    "$env:LOCALAPPDATA\Python\pythoncore-3.15-64\python.exe",
+    "$env:LOCALAPPDATA\Python\pythoncore-3.14-64\python.exe",
+    "$env:LOCALAPPDATA\Python\pythoncore-3.13-64\python.exe",
+    "C:\Python313\python.exe",
+    "C:\Python312\python.exe",
+    "C:\Python311\python.exe",
+    "C:\Python310\python.exe",
+    "C:\Program Files\Python313\python.exe",
+    "C:\Program Files\Python312\python.exe",
+    "C:\Program Files\Python311\python.exe"
+)
+foreach ($p in $candidatePaths) { if (Test-Path $p) { $pythonExe = $p; break } }
+if (-not $pythonExe) {
+    $found = Get-ChildItem "$env:LOCALAPPDATA\Python" -Filter "python.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) { $pythonExe = $found.FullName }
+}
+if (-not $pythonExe) {
+    $cmd = Get-Command python -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -notlike "*WindowsApps*" } | Select-Object -First 1
+    if ($cmd) { $pythonExe = $cmd.Source }
+}
+if (-not $pythonExe) { $pythonExe = (Get-Command python).Source }
 Write-Host "  Python: $pythonExe" -ForegroundColor Gray
 
 $batLines = @(
