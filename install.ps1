@@ -160,13 +160,16 @@ Write-Host "  API key saved to system environment." -ForegroundColor Green
 # ---------------------------------------------------------------------------
 Write-Host "[5/7] Creating service startup script..." -ForegroundColor Yellow
 
+$pythonExe = (Get-Command python).Source
+Write-Host "  Python: $pythonExe" -ForegroundColor Gray
+
 $batLines = @(
     "@echo off",
     ":: vm-mcp service startup wrapper",
     "set VM_MCP_API_KEY=$API_KEY",
     "set VM_MCP_PORT=$PORT",
     "set VM_MCP_HOST=0.0.0.0",
-    "python `"$INSTALL_DIR\server.py`" >> `"$INSTALL_DIR\vm-mcp.log`" 2>&1"
+    "`"$pythonExe`" `"$INSTALL_DIR\server.py`""
 )
 $batLines -join "`r`n" | Out-File -FilePath "$INSTALL_DIR\start.bat" -Encoding ASCII
 
@@ -206,8 +209,6 @@ if ($existingTask) {
     Unregister-ScheduledTask -TaskName $SERVICE_NAME -Confirm:$false
 }
 
-$pythonExe = (Get-Command python).Source
-
 if ($nssmPath) {
     Write-Host "  Using NSSM to register service..." -ForegroundColor Cyan
 
@@ -216,7 +217,9 @@ if ($nssmPath) {
 
     # Set ALL environment variables in a single AppEnvironmentExtra call.
     # NSSM replaces the entire block on each call, so separate calls overwrite each other.
-    $envBlock = "VM_MCP_API_KEY=$API_KEY`nVM_MCP_PORT=$PORT`nVM_MCP_HOST=0.0.0.0"
+    # Include the Python directory in PATH so python can find its own DLLs.
+    $pythonDir = Split-Path $pythonExe -Parent
+    $envBlock = "VM_MCP_API_KEY=$API_KEY`nVM_MCP_PORT=$PORT`nVM_MCP_HOST=0.0.0.0`nPATH=$pythonDir;$pythonDir\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
     & nssm set $SERVICE_NAME AppEnvironmentExtra $envBlock
 
     & nssm set $SERVICE_NAME AppStdout "$INSTALL_DIR\vm-mcp.log"

@@ -36,8 +36,15 @@ if (-not $port) { $port = "8765" }
 # Re-apply environment to the NSSM service registration (single call — multiple calls overwrite each other)
 $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
 if ($nssmCmd) {
-    $envBlock = "VM_MCP_API_KEY=$apiKey`nVM_MCP_PORT=$port`nVM_MCP_HOST=0.0.0.0"
+    $pythonDir = if ($pythonExe) { Split-Path $pythonExe -Parent } else { "" }
+    $envBlock  = "VM_MCP_API_KEY=$apiKey`nVM_MCP_PORT=$port`nVM_MCP_HOST=0.0.0.0`nPATH=$pythonDir;$pythonDir\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
     & nssm set $SERVICE_NAME AppEnvironmentExtra $envBlock 2>$null
+
+    # Also make sure Application points to the full Python path
+    if ($pythonExe) {
+        & nssm set $SERVICE_NAME Application $pythonExe 2>$null
+        & nssm set $SERVICE_NAME AppParameters "`"$INSTALL_DIR\server.py`"" 2>$null
+    }
 }
 
 # 4. Start the service
