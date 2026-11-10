@@ -192,9 +192,10 @@ $batLines = @(
     "set VM_MCP_API_KEY=$API_KEY",
     "set VM_MCP_PORT=$PORT",
     "set VM_MCP_HOST=0.0.0.0",
-    "`"$pythonExe`" `"$INSTALL_DIR\server.py`""
+    ("`"" + $pythonExe + "`" `"" + $INSTALL_DIR + "\server.py`"")
 )
 $batLines -join "`r`n" | Out-File -FilePath "$INSTALL_DIR\start.bat" -Encoding ASCII
+Write-Host "  Python line: $($batLines[-1])" -ForegroundColor Gray
 
 Write-Host "  Startup script: $INSTALL_DIR\start.bat" -ForegroundColor Green
 

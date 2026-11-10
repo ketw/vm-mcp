@@ -84,9 +84,15 @@ if ($status -eq "Running") {
 
     # Ensure start.bat exists with full python path
     if ($pythonExe) {
-        $batContent = "@echo off`r`nset VM_MCP_API_KEY=$apiKey`r`nset VM_MCP_PORT=$port`r`nset VM_MCP_HOST=0.0.0.0`r`n`"$pythonExe`" `"$INSTALL_DIR\server.py`""
+        $line1 = "@echo off"
+        $line2 = "set VM_MCP_API_KEY=$apiKey"
+        $line3 = "set VM_MCP_PORT=$port"
+        $line4 = "set VM_MCP_HOST=0.0.0.0"
+        $line5 = "`"$pythonExe`" `"$INSTALL_DIR\server.py`""
+        $batContent = ($line1, $line2, $line3, $line4, $line5) -join "`r`n"
         [System.IO.File]::WriteAllText("$INSTALL_DIR\start.bat", $batContent, [System.Text.Encoding]::ASCII)
         Write-Host "  Wrote start.bat with full Python path: $pythonExe" -ForegroundColor Gray
+        Write-Host "  Last line of start.bat: $line5" -ForegroundColor Gray
     }
 
     # Remove old task if present
