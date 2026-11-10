@@ -158,6 +158,11 @@ UPDATE_URL:   str = os.environ.get(
     "VM_MCP_UPDATE_URL",
     "https://raw.githubusercontent.com/ketw/vm-mcp/master/src/server.py",
 )
+
+# Full paths — required when running as SYSTEM (which has a minimal PATH)
+PWSH:   str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+CMD:    str = r"C:\Windows\System32\cmd.exe"
+SCHTASKS: str = r"C:\Windows\System32\schtasks.exe"
 LOG_FILE: Path = Path(os.environ.get("VM_MCP_LOG", str(INSTALL_DIR / "vm-mcp.log")))
 
 # IP allowlist
@@ -269,20 +274,20 @@ def _run_ps(command: str, timeout: int = SHELL_TIMEOUT, elevated: bool = False) 
             encoding="utf-8",
         )
         subprocess.run(
-            f'schtasks /Create /TN "{task}" /TR '
-            f'"powershell.exe -ExecutionPolicy Bypass -NonInteractive -File \\"{script}\\"" '
+            f'"{SCHTASKS}" /Create /TN "{task}" /TR '
+            f'"{PWSH} -ExecutionPolicy Bypass -NonInteractive -File \\"{script}\\"" '
             f"/SC ONCE /ST 00:00 /RU SYSTEM /F",
             shell=True, capture_output=True,
         )
-        subprocess.run(f'schtasks /Run /TN "{task}"', shell=True, capture_output=True)
+        subprocess.run(f'"{SCHTASKS}" /Run /TN "{task}"', shell=True, capture_output=True)
         time.sleep(min(timeout, 60))
-        subprocess.run(f'schtasks /Delete /TN "{task}" /F', shell=True, capture_output=True)
+        subprocess.run(f'"{SCHTASKS}" /Delete /TN "{task}" /F', shell=True, capture_output=True)
         stdout = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
         script.unlink(missing_ok=True); out.unlink(missing_ok=True)
         return {"stdout": stdout.rstrip("\n"), "stderr": "", "exit_code": 0}
 
     result = subprocess.run(
-        ["powershell.exe", "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command", command],
+        [PWSH, "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command", command],
         capture_output=True, text=True, timeout=timeout,
         encoding="utf-8", errors="replace",
     )
@@ -350,7 +355,7 @@ def shell_run(
     if working_directory:
         command = f'Set-Location -Path "{working_directory}"; {command}'
     result = subprocess.run(
-        ["powershell.exe", "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command", command],
+        [PWSH, "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command", command],
         capture_output=True, text=True, timeout=timeout_seconds,
         encoding="utf-8", errors="replace",
     )
@@ -388,11 +393,11 @@ def shell_run_bg(command: str, working_directory: str = "") -> dict:
 
     Returns: {started, pid}
     """
-    kwargs: dict = {"shell": True}
+    kwargs: dict = {"shell": False}
     if working_directory:
         kwargs["cwd"] = working_directory
     proc = subprocess.Popen(
-        f'powershell.exe -ExecutionPolicy Bypass -NonInteractive -Command "{command}"',
+        [PWSH, "-ExecutionPolicy", "Bypass", "-NonInteractive", "-Command", command],
         **kwargs,
     )
     return {"started": True, "pid": proc.pid}
