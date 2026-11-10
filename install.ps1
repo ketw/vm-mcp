@@ -63,29 +63,45 @@ Write-Host "[3/7] Installing Python dependencies..." -ForegroundColor Yellow
 
 & python -m pip install --upgrade pip --quiet
 
-# pyyaml 6.x ships a C extension that requires Visual C++ Build Tools to
-# compile from source. On Python 3.13+ there is no pre-built wheel on PyPI.
-# Installing with --no-build-isolation forces the pure-Python fallback path
-# (pyyaml works fine without the C extension -- it just uses the Python
-# scanner/emitter instead, which is slightly slower but fully correct).
-Write-Host "  Installing pyyaml (pure-Python, no C compiler needed)..." -ForegroundColor Gray
-& python -m pip install pyyaml --no-build-isolation --quiet 2>&1 | Out-Null
-# If that also fails (very old pip), install from the pure-python sdist flag
-if ($LASTEXITCODE -ne 0) {
-    & python -m pip install "pyyaml>=5.4" --only-binary pyyaml --quiet 2>&1 | Out-Null
+# pyyaml 6.x has no pre-built wheel for Python 3.13+ on PyPI.
+# 'pyyaml-cp315' is an unofficial but legitimate repackage of pyyaml 6.0.3
+# that ships the missing cp315/cp315t wheels. It installs the exact same
+# 'yaml' package as pyyaml — pip treats them as the same distribution.
+# See: https://pypi.org/project/pyyaml-cp315/
+#
+# Detection: check the Python minor version and install the right package.
+$pyMinor = & python -c "import sys; print(sys.version_info.minor)"
+$pyMajor = & python -c "import sys; print(sys.version_info.major)"
+
+Write-Host "  Detected Python $pyMajor.$pyMinor" -ForegroundColor Gray
+
+if ([int]$pyMajor -ge 3 -and [int]$pyMinor -ge 13) {
+    # Python 3.13+ — install the cp315-compatible wheel package first
+    Write-Host "  Installing pyyaml wheel for Python 3.13+ (pyyaml-cp315)..." -ForegroundColor Gray
+    & python -m pip install pyyaml-cp315 --prefer-binary --quiet
+    if ($LASTEXITCODE -ne 0) {
+        # Fallback: install setuptools then build from source (last resort)
+        Write-Host "  pyyaml-cp315 not available, trying with setuptools fallback..." -ForegroundColor Yellow
+        & python -m pip install setuptools wheel --upgrade --quiet
+        $env:PYYAML_FORCE_CYTHON = "0"
+        & python -m pip install pyyaml --no-build-isolation --quiet
+        Remove-Item Env:\PYYAML_FORCE_CYTHON -ErrorAction SilentlyContinue
+    }
+} else {
+    # Python 3.12 and below — standard pyyaml has wheels, install normally
+    Write-Host "  Installing pyyaml (standard)..." -ForegroundColor Gray
+    & python -m pip install pyyaml --prefer-binary --quiet
 }
 
-# Install the rest.
+# Install the rest. pyyaml is already satisfied above so pip skips it.
 # --prefer-binary : always pick a wheel over an sdist for every package.
-# --no-build-isolation is NOT passed here because most packages need it.
-# pyyaml is already installed above so pip will skip it in this pass.
 Write-Host "  Installing remaining dependencies..." -ForegroundColor Gray
 & python -m pip install -r "$INSTALL_DIR\requirements.txt" --prefer-binary
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "ERROR: pip install failed." -ForegroundColor Red
-    Write-Host "  Manual fix -- run these two commands on the VM:" -ForegroundColor Yellow
-    Write-Host "    python -m pip install pyyaml --no-build-isolation" -ForegroundColor White
+    Write-Host "  Manual fix -- run these commands on the VM:" -ForegroundColor Yellow
+    Write-Host "    python -m pip install pyyaml-cp315 --prefer-binary" -ForegroundColor White
     Write-Host "    python -m pip install -r C:\VmMcp\requirements.txt --prefer-binary" -ForegroundColor White
     exit 1
 }
