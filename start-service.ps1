@@ -1,83 +1,123 @@
 # start-service.ps1 -- Start the vm-mcp server (run after install.ps1)
 # Run this if the service shows Stopped after install.
-#
-# The service may be Stopped because:
-#   1. NSSM was installed in the same session and Python path wasn't resolved yet
-#   2. The service needs pywin32 post-install hook to run first
-#
-# This script fixes both and starts the server.
 
 #Requires -RunAsAdministrator
 $ErrorActionPreference = "SilentlyContinue"
 
 $SERVICE_NAME = "VmMcpServer"
+$TASK_NAME    = "VmMcpTask"
 $INSTALL_DIR  = "C:\VmMcp"
 
 Write-Host "vm-mcp service startup fix" -ForegroundColor Cyan
 Write-Host ""
 
-# 1. Run pywin32 post-install (registers COM objects, needed on first install)
-Write-Host "  Running pywin32 post-install..." -ForegroundColor Gray
+# Resolve python exe and env vars
 $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
-if ($pythonExe) {
-    & python "$((Get-Item $pythonExe).DirectoryName)\Lib\site-packages\win32\scripts\pywin32_postinstall.py" -install 2>$null
-}
+$apiKey    = [System.Environment]::GetEnvironmentVariable("VM_MCP_API_KEY", "Machine")
+$port      = [System.Environment]::GetEnvironmentVariable("VM_MCP_PORT",    "Machine")
+if (-not $port) { $port = "8765" }
 
-# 2. Refresh PATH in this session
+# 1. Refresh PATH in this session
 $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
 $userPath    = [System.Environment]::GetEnvironmentVariable("PATH", "User")
 $env:PATH    = $machinePath + ";" + $userPath
 
-# 3. Set the env vars the service needs (in case they were set after NSSM registered)
-$apiKey = [System.Environment]::GetEnvironmentVariable("VM_MCP_API_KEY", "Machine")
-$port   = [System.Environment]::GetEnvironmentVariable("VM_MCP_PORT",    "Machine")
-if (-not $port) { $port = "8765" }
-
-# Re-apply environment to the NSSM service registration (single call — multiple calls overwrite each other)
+# ---------------------------------------------------------------------------
+# Try NSSM service first
+# ---------------------------------------------------------------------------
 $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
-if ($nssmCmd) {
-    $pythonDir = if ($pythonExe) { Split-Path $pythonExe -Parent } else { "" }
-    $envBlock  = "VM_MCP_API_KEY=$apiKey`nVM_MCP_PORT=$port`nVM_MCP_HOST=0.0.0.0`nPATH=$pythonDir;$pythonDir\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
-    & nssm set $SERVICE_NAME AppEnvironmentExtra $envBlock 2>$null
+if ($nssmCmd -and $pythonExe) {
+    Write-Host "  Reconfiguring NSSM service with full Python path..." -ForegroundColor Gray
 
-    # Also make sure Application points to the full Python path
-    if ($pythonExe) {
-        & nssm set $SERVICE_NAME Application $pythonExe 2>$null
-        & nssm set $SERVICE_NAME AppParameters "`"$INSTALL_DIR\server.py`"" 2>$null
-    }
+    $pythonDir = Split-Path $pythonExe -Parent
+    # Single AppEnvironmentExtra call with all vars + PATH
+    $envBlock = "VM_MCP_API_KEY=$apiKey`nVM_MCP_PORT=$port`nVM_MCP_HOST=0.0.0.0`nPATH=$pythonDir;$pythonDir\Scripts;$env:SystemRoot\System32;$env:SystemRoot"
+    & nssm set $SERVICE_NAME Application      $pythonExe                   2>$null
+    & nssm set $SERVICE_NAME AppParameters    "`"$INSTALL_DIR\server.py`"" 2>$null
+    & nssm set $SERVICE_NAME AppDirectory     $INSTALL_DIR                 2>$null
+    & nssm set $SERVICE_NAME AppEnvironmentExtra $envBlock                 2>$null
+    & nssm set $SERVICE_NAME ObjectName       LocalSystem                  2>$null
 }
 
-# 4. Start the service
-Write-Host "  Starting service '$SERVICE_NAME'..." -ForegroundColor Yellow
+Write-Host "  Starting NSSM service '$SERVICE_NAME'..." -ForegroundColor Yellow
 Start-Service -Name $SERVICE_NAME -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 3
-
+Start-Sleep -Seconds 4
 $status = (Get-Service -Name $SERVICE_NAME -ErrorAction SilentlyContinue).Status
 
 if ($status -eq "Running") {
-    Write-Host "  Service is Running." -ForegroundColor Green
+    Write-Host "  NSSM service is Running." -ForegroundColor Green
+} else {
+    Write-Host "  NSSM service status: $status -- switching to Task Scheduler..." -ForegroundColor Yellow
     Write-Host ""
 
-    # Quick health check
-    try {
-        $resp = Invoke-WebRequest -Uri "http://localhost:$port/health" -TimeoutSec 3 -UseBasicParsing
-        Write-Host "  Health check: $($resp.Content)" -ForegroundColor Green
-    } catch {
-        Write-Host "  Health check on port $port failed -- check log:" -ForegroundColor Yellow
-        Write-Host "    Get-Content $INSTALL_DIR\vm-mcp-err.log -Tail 20" -ForegroundColor White
+    # -----------------------------------------------------------------------
+    # Fallback: Scheduled Task (runs the bat file which has full python path)
+    # -----------------------------------------------------------------------
+
+    # Ensure start.bat exists with full python path
+    if ($pythonExe) {
+        $batContent = "@echo off`r`nset VM_MCP_API_KEY=$apiKey`r`nset VM_MCP_PORT=$port`r`nset VM_MCP_HOST=0.0.0.0`r`n`"$pythonExe`" `"$INSTALL_DIR\server.py`""
+        [System.IO.File]::WriteAllText("$INSTALL_DIR\start.bat", $batContent, [System.Text.Encoding]::ASCII)
+        Write-Host "  Wrote start.bat with full Python path: $pythonExe" -ForegroundColor Gray
     }
-} else {
-    Write-Host "  Service status: $status" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  Checking error log:" -ForegroundColor Yellow
-    if (Test-Path "$INSTALL_DIR\vm-mcp-err.log") {
-        Get-Content "$INSTALL_DIR\vm-mcp-err.log" -Tail 30
-    } else {
-        Write-Host "  No error log found at $INSTALL_DIR\vm-mcp-err.log" -ForegroundColor Gray
-    }
-    Write-Host ""
-    Write-Host "  Try running manually to see the error:" -ForegroundColor Yellow
-    Write-Host "    `$env:VM_MCP_API_KEY = '$apiKey'" -ForegroundColor White
-    Write-Host "    `$env:VM_MCP_PORT    = '$port'" -ForegroundColor White
-    Write-Host "    python $INSTALL_DIR\server.py" -ForegroundColor White
+
+    # Remove old task if present
+    Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue
+
+    $action    = New-ScheduledTaskAction `
+                    -Execute   "$env:SystemRoot\System32\cmd.exe" `
+                    -Argument  "/c `"$INSTALL_DIR\start.bat`" > `"$INSTALL_DIR\vm-mcp.log`" 2>&1"
+    $trigger   = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $settings  = New-ScheduledTaskSettingsSet `
+                    -AllowStartIfOnBatteries `
+                    -DontStopIfGoingOnBatteries `
+                    -StartWhenAvailable `
+                    -ExecutionTimeLimit (New-TimeSpan -Days 365)
+
+    Register-ScheduledTask `
+        -TaskName  $TASK_NAME `
+        -Action    $action `
+        -Trigger   $trigger `
+        -Principal $principal `
+        -Settings  $settings `
+        -Force | Out-Null
+
+    Write-Host "  Scheduled Task '$TASK_NAME' registered." -ForegroundColor Green
+    Write-Host "  Starting task now..." -ForegroundColor Yellow
+    Start-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 4
 }
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "  Health check on port $port..." -ForegroundColor Gray
+Start-Sleep -Seconds 2
+try {
+    $resp = Invoke-WebRequest -Uri "http://localhost:$port/sse" -TimeoutSec 5 -UseBasicParsing -Headers @{"X-Api-Key"=$apiKey}
+    Write-Host "  Server responded -- OK" -ForegroundColor Green
+} catch {
+    # A connection reset or partial read on SSE is fine -- it means the server is up
+    if ($_.Exception.Message -match "forcibly closed|connection|partial") {
+        Write-Host "  Server is up (SSE endpoint responded)." -ForegroundColor Green
+    } else {
+        Write-Host "  No response on port $port : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Error log:" -ForegroundColor Yellow
+        if (Test-Path "$INSTALL_DIR\vm-mcp-err.log") { Get-Content "$INSTALL_DIR\vm-mcp-err.log" -Tail 30 }
+        if (Test-Path "$INSTALL_DIR\vm-mcp.log")     { Get-Content "$INSTALL_DIR\vm-mcp.log"     -Tail 20 }
+        Write-Host ""
+        Write-Host "  Run manually to see the error:" -ForegroundColor Yellow
+        Write-Host "    `$env:VM_MCP_API_KEY = '$apiKey'" -ForegroundColor White
+        Write-Host "    `$env:VM_MCP_PORT    = '$port'"   -ForegroundColor White
+        Write-Host "    python $INSTALL_DIR\server.py"    -ForegroundColor White
+        exit 1
+    }
+}
+
+Write-Host ""
+Write-Host "  Server URL : http://<your-public-ip>:$port/sse" -ForegroundColor Cyan
+Write-Host "  API Key    : $apiKey" -ForegroundColor Cyan
+Write-Host ""
