@@ -57,52 +57,62 @@ Copy-Item -Path "$SCRIPT_DIR\src\*" -Destination $INSTALL_DIR -Recurse -Force
 Write-Host "  Copied." -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
-# Step 3: Install Python dependencies
+# Step 3: Install Visual C++ Build Tools + Python dependencies
 # ---------------------------------------------------------------------------
-Write-Host "[3/7] Installing Python dependencies..." -ForegroundColor Yellow
+Write-Host "[3/7] Installing dependencies..." -ForegroundColor Yellow
 
 & python -m pip install --upgrade pip --quiet
 
-# pyyaml 6.x has no pre-built wheel for Python 3.13+ on PyPI.
-# 'pyyaml-cp315' is an unofficial but legitimate repackage of pyyaml 6.0.3
-# that ships the missing cp315/cp315t wheels. It installs the exact same
-# 'yaml' package as pyyaml — pip treats them as the same distribution.
-# See: https://pypi.org/project/pyyaml-cp315/
-#
-# Detection: check the Python minor version and install the right package.
-$pyMinor = & python -c "import sys; print(sys.version_info.minor)"
-$pyMajor = & python -c "import sys; print(sys.version_info.major)"
+# Check if Visual C++ Build Tools are already present by probing for cl.exe
+$vsWhere   = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$clPresent = $false
 
-Write-Host "  Detected Python $pyMajor.$pyMinor" -ForegroundColor Gray
-
-if ([int]$pyMajor -ge 3 -and [int]$pyMinor -ge 13) {
-    # Python 3.13+ — install the cp315-compatible wheel package first
-    Write-Host "  Installing pyyaml wheel for Python 3.13+ (pyyaml-cp315)..." -ForegroundColor Gray
-    & python -m pip install pyyaml-cp315 --prefer-binary --quiet
-    if ($LASTEXITCODE -ne 0) {
-        # Fallback: install setuptools then build from source (last resort)
-        Write-Host "  pyyaml-cp315 not available, trying with setuptools fallback..." -ForegroundColor Yellow
-        & python -m pip install setuptools wheel --upgrade --quiet
-        $env:PYYAML_FORCE_CYTHON = "0"
-        & python -m pip install pyyaml --no-build-isolation --quiet
-        Remove-Item Env:\PYYAML_FORCE_CYTHON -ErrorAction SilentlyContinue
-    }
-} else {
-    # Python 3.12 and below — standard pyyaml has wheels, install normally
-    Write-Host "  Installing pyyaml (standard)..." -ForegroundColor Gray
-    & python -m pip install pyyaml --prefer-binary --quiet
+if (Test-Path $vsWhere) {
+    $vcPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+    if ($vcPath) { $clPresent = $true }
 }
 
-# Install the rest. pyyaml is already satisfied above so pip skips it.
-# --prefer-binary : always pick a wheel over an sdist for every package.
-Write-Host "  Installing remaining dependencies..." -ForegroundColor Gray
+if (-not $clPresent) {
+    Write-Host ""
+    Write-Host "  Visual C++ Build Tools not found." -ForegroundColor Yellow
+    Write-Host "  pyyaml (required by fastmcp) must be compiled from source on Python 3.15." -ForegroundColor Yellow
+    Write-Host "  Installing Microsoft C++ Build Tools (~4 GB) via winget..." -ForegroundColor Yellow
+    Write-Host "  This may take 5-15 minutes depending on your connection." -ForegroundColor Yellow
+    Write-Host ""
+
+    # Microsoft.VisualStudio.2022.BuildTools installs only the CLI build tools,
+    # not the full IDE. The --override passes the VS installer component list.
+    winget install --id Microsoft.VisualStudio.2022.BuildTools `
+        --silent `
+        --accept-package-agreements `
+        --accept-source-agreements `
+        --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+        # 3010 = success, reboot required (we don't reboot — build tools work immediately for cl.exe)
+        Write-Host "  Visual C++ Build Tools installed." -ForegroundColor Green
+
+        # Refresh environment so vcvars are on PATH for this session
+        $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+        $userPath    = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        $env:PATH    = $machinePath + ";" + $userPath
+    } else {
+        Write-Host "  WARNING: winget returned $LASTEXITCODE for Build Tools install." -ForegroundColor Yellow
+        Write-Host "  Attempting pip install anyway -- if it fails, install manually:" -ForegroundColor Yellow
+        Write-Host "  winget install Microsoft.VisualStudio.2022.BuildTools" -ForegroundColor White
+    }
+} else {
+    Write-Host "  Visual C++ Build Tools already installed." -ForegroundColor Green
+}
+
+# Now install Python packages. pyyaml will compile successfully with cl.exe present.
+Write-Host "  Installing Python packages..." -ForegroundColor Gray
 & python -m pip install -r "$INSTALL_DIR\requirements.txt" --prefer-binary
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "ERROR: pip install failed." -ForegroundColor Red
-    Write-Host "  Manual fix -- run these commands on the VM:" -ForegroundColor Yellow
-    Write-Host "    python -m pip install pyyaml-cp315 --prefer-binary" -ForegroundColor White
-    Write-Host "    python -m pip install -r C:\VmMcp\requirements.txt --prefer-binary" -ForegroundColor White
+    Write-Host "  If you see a C++ build error, make sure Visual C++ Build Tools" -ForegroundColor Yellow
+    Write-Host "  finished installing, then re-run install.ps1" -ForegroundColor Yellow
     exit 1
 }
 
