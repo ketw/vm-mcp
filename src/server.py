@@ -269,9 +269,9 @@ def _run_ps(command: str, timeout: int = SHELL_TIMEOUT, elevated: bool = False) 
         script = Path(tempfile.mktemp(suffix=".ps1"))
         out    = Path(tempfile.mktemp(suffix=".txt"))
         script.write_text(
-            f"$ErrorActionPreference='Continue'\n{command}\n"
+            f"$ErrorActionPreference='Continue'\n[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n{command}\n"
             f'$LASTEXITCODE | Out-File "{out}" -Append',
-            encoding="utf-8",
+            encoding="utf-8-sig",
         )
         subprocess.run(
             f'"{SCHTASKS}" /Create /TN "{task}" /TR '
@@ -816,13 +816,18 @@ def process_kill(pid: Optional[int] = None, name: str = "", force: bool = True) 
     Returns: {killed, stderr}
     """
     if pid is not None:
-        cmd = f"Stop-Process -Id {pid}{' -Force' if force else ''} -ErrorAction SilentlyContinue"
+        cmd = f"taskkill /PID {pid}{' /F' if force else ''}"
     elif name:
-        cmd = f"Stop-Process -Name '{name}'{' -Force' if force else ''} -ErrorAction SilentlyContinue"
+        # strip .exe suffix if provided, taskkill /IM needs the exe name
+        exe = name if name.lower().endswith(".exe") else name + ".exe"
+        cmd = f"taskkill /IM \"{exe}\"{' /F' if force else ''}"
     else:
         return {"error": "Provide pid or name"}
-    r = _run_ps(cmd)
-    return {"killed": r["exit_code"] == 0, "stderr": r["stderr"]}
+    result = subprocess.run(
+        [CMD, "/c", cmd],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+    )
+    return {"killed": result.returncode == 0, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -840,6 +845,40 @@ def screenshot(scale: float = 0.75, region: Optional[list[int]] = None) -> dict:
 
     Returns: {image_base64, width, height, size_bytes}
     """
+    # Primary: GDI screenshot via PowerShell (works in SYSTEM session, no pyautogui needed)
+    ps_script = r"""
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$bounds  = [System.Drawing.Rectangle]::Empty
+foreach ($s in $screens) { $bounds = [System.Drawing.Rectangle]::Union($bounds, $s.Bounds) }
+$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+$g   = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+$g.Dispose()
+$tmp = [System.IO.Path]::GetTempFileName() + '.png'
+$bmp.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Dispose()
+Write-Output $tmp
+"""
+    r = _run_ps(ps_script)
+    img_path = r["stdout"].strip()
+    if img_path and Path(img_path).exists():
+        from PIL import Image
+        img = Image.open(img_path)
+        Path(img_path).unlink(missing_ok=True)
+        if region and len(region) == 4:
+            img = img.crop((region[0], region[1], region[0]+region[2], region[1]+region[3]))
+        if scale != 1.0:
+            img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        data = buf.getvalue()
+        return {
+            "image_base64": base64.b64encode(data).decode("ascii"),
+            "width": img.width, "height": img.height,
+            "format": "PNG", "size_bytes": len(data),
+        }
+    # Fallback: pyautogui / PIL ImageGrab
     try:
         from PIL import ImageGrab, Image
         bbox = tuple(region) if region and len(region) == 4 else None
@@ -851,31 +890,11 @@ def screenshot(scale: float = 0.75, region: Optional[list[int]] = None) -> dict:
         data = buf.getvalue()
         return {
             "image_base64": base64.b64encode(data).decode("ascii"),
-            "width":        img.width,
-            "height":       img.height,
-            "format":       "PNG",
-            "size_bytes":   len(data),
+            "width": img.width, "height": img.height,
+            "format": "PNG", "size_bytes": len(data),
         }
-    except ImportError:
-        ps = r"""
-Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$b = New-Object System.Drawing.Bitmap($s.Width,$s.Height)
-$g = [System.Drawing.Graphics]::FromImage($b)
-$g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size)
-$g.Dispose()
-$p = [System.IO.Path]::GetTempFileName()+'.png'
-$b.Save($p,[System.Drawing.Imaging.ImageFormat]::Png)
-$b.Dispose()
-Write-Output $p
-"""
-        r = _run_ps(ps)
-        img_path = r["stdout"].strip()
-        if img_path and Path(img_path).exists():
-            data = Path(img_path).read_bytes()
-            Path(img_path).unlink(missing_ok=True)
-            return {"image_base64": base64.b64encode(data).decode("ascii"), "format": "PNG", "size_bytes": len(data)}
-        return {"error": "Screenshot failed", "stderr": r["stderr"]}
+    except Exception as e:
+        return {"error": f"screen grab failed: {e}", "ps_stderr": r.get("stderr", "")}
 
 
 @mcp.tool()
@@ -1214,28 +1233,38 @@ def net_info() -> dict:
     Return network configuration: adapters, IPs, default gateway, DNS, public IP.
     """
     r = _run_ps(
-        "Get-NetIPConfiguration | Select-Object InterfaceAlias,"
-        "IPv4Address,IPv6Address,DNSServer | ConvertTo-Json -Depth 4 -Compress"
+        "$adapters = Get-NetIPConfiguration -ErrorAction SilentlyContinue; "
+        "$out = @(); "
+        "foreach ($a in $adapters) { "
+        "  $ipv4 = ($a.IPv4Address | ForEach-Object { $_.IPAddress }) -join ','; "
+        "  $dns  = ($a.DNSServer   | ForEach-Object { $_.ServerAddresses } | Where-Object { $_ -ne '' }) -join ','; "
+        "  $out += [PSCustomObject]@{ "
+        "    Interface = $a.InterfaceAlias; "
+        "    IPv4      = $ipv4; "
+        "    DNS       = $dns "
+        "  } "
+        "}; "
+        "$out | ConvertTo-Json -Compress"
     )
     public_ip = ""
     try:
         public_ip = httpx.get("https://api.ipify.org", timeout=5).text.strip()
     except Exception:
         pass
-
-    gw = _run_ps("(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1).NextHop")
-
+    gw = _run_ps(
+        "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue "
+        "| Sort-Object RouteMetric | Select-Object -First 1).NextHop"
+    )
     try:
         adapters = json.loads(r["stdout"])
         if isinstance(adapters, dict): adapters = [adapters]
     except Exception:
         adapters = []
-
     return {
-        "adapters":   adapters,
-        "public_ip":  public_ip,
-        "gateway":    gw["stdout"].strip(),
-        "hostname":   socket.gethostname(),
+        "adapters":  adapters,
+        "public_ip": public_ip,
+        "gateway":   gw["stdout"].strip(),
+        "hostname":  socket.gethostname(),
     }
 
 
@@ -1251,28 +1280,29 @@ def net_ping(host: str, count: int = 4, timeout_ms: int = 1000) -> dict:
 
     Returns: {host, sent, received, lost_pct, min_ms, max_ms, avg_ms}
     """
-    r = _run_ps(
-        f"Test-Connection -ComputerName '{host}' -Count {count} "
-        f"-TimeoutSeconds {max(1, timeout_ms // 1000)} -ErrorAction SilentlyContinue | "
-        f"Select-Object Address,Latency,Status | ConvertTo-Json -Compress"
+    # Use ping.exe directly — Test-Connection parameter set varies across PS versions
+    timeout_s = max(1, timeout_ms // 1000)
+    result = subprocess.run(
+        [r"C:\Windows\System32\ping.exe", "-n", str(count), "-w", str(timeout_ms), host],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s * count + 5,
     )
-    try:
-        results = json.loads(r["stdout"])
-        if isinstance(results, dict): results = [results]
-        latencies = [p["Latency"] for p in results if p.get("Status") == "Success" and p.get("Latency")]
-        sent = len(results) if results else count
-        recv = len(latencies)
-        return {
-            "host":      host,
-            "sent":      sent,
-            "received":  recv,
-            "lost_pct":  round((sent - recv) / sent * 100) if sent else 100,
-            "min_ms":    min(latencies) if latencies else None,
-            "max_ms":    max(latencies) if latencies else None,
-            "avg_ms":    round(sum(latencies) / len(latencies), 1) if latencies else None,
-        }
-    except Exception:
-        return {"raw": r["stdout"], "error": r["stderr"]}
+    out = result.stdout
+    import re
+    times = [int(m) for m in re.findall(r"time[=<](\d+)ms", out, re.IGNORECASE)]
+    sent_m  = re.search(r"Sent\s*=\s*(\d+)", out)
+    recv_m  = re.search(r"Received\s*=\s*(\d+)", out)
+    sent = int(sent_m.group(1)) if sent_m else count
+    recv = int(recv_m.group(1)) if recv_m else len(times)
+    return {
+        "host":     host,
+        "sent":     sent,
+        "received": recv,
+        "lost_pct": round((sent - recv) / sent * 100) if sent else 100,
+        "min_ms":   min(times) if times else None,
+        "max_ms":   max(times) if times else None,
+        "avg_ms":   round(sum(times) / len(times), 1) if times else None,
+        "reachable": recv > 0,
+    }
 
 
 @mcp.tool()
@@ -1492,16 +1522,22 @@ def event_log_read(
     """
     when = f"(Get-Date).AddHours(-{hours_back})"
     cmd = (
-        f"Get-WinEvent -LogName '{log_name}' "
-        f"-FilterXPath \"*[System[TimeCreated[timediff(@SystemTime) <= {hours_back * 3600000}]]]\" "
-        f"-ErrorAction SilentlyContinue -MaxEvents {max_entries * 3} | "
+        f"$since = (Get-Date).AddHours(-{hours_back}); "
+        f"$filter = @{{LogName='{log_name}'; StartTime=$since}}; "
     )
-    if source: cmd += f"Where-Object {{ $_.ProviderName -like '*{source}*' }} | "
-    if level:  cmd += f"Where-Object {{ $_.LevelDisplayName -like '{level}' }} | "
+    if level:
+        level_map = {"Error": 2, "Warning": 3, "Information": 4}
+        lvl = level_map.get(level, 4)
+        cmd += f"$filter['Level'] = {lvl}; "
     cmd += (
-        f"Select-Object -First {max_entries} | "
-        "Select-Object TimeCreated,LevelDisplayName,ProviderName,Id,Message | "
-        "ConvertTo-Json -Compress"
+        f"Get-WinEvent -FilterHashtable $filter -MaxEvents {max_entries * 3} -ErrorAction SilentlyContinue "
+    )
+    if source: cmd += f"| Where-Object {{ $_.ProviderName -like '*{source}*' }} "
+    cmd += (
+        f"| Select-Object -First {max_entries} "
+        "| Select-Object TimeCreated,LevelDisplayName,ProviderName,Id,"
+        "@{N='Message';E={$_.Message -replace '`r`n',' ' -replace '`n',' '}} "
+        "| ConvertTo-Json -Compress"
     )
     r = _run_ps(cmd, timeout=30)
     try:
@@ -1577,18 +1613,27 @@ def env_set(name: str, value: Optional[str], scope: str = "Machine") -> dict:
 
 
 @mcp.tool()
-def installed_drivers() -> dict:
+def installed_drivers(filter_name: str = "", state_filter: str = "") -> dict:
     """
     List installed kernel-mode drivers with their state and start type.
 
+    Args:
+        filter_name: Optional name substring filter (e.g. 'Nemo', 'vmware').
+        state_filter: Optional state filter — Running or Stopped.
+
     Returns: {drivers, count}
     """
-    r = _run_ps(
+    ps = (
         "Get-WmiObject Win32_SystemDriver | "
         "Select-Object Name,DisplayName,State,StartMode,PathName | "
-        "Sort-Object Name | ConvertTo-Json -Compress",
-        timeout=30,
+        "Sort-Object Name"
     )
+    if filter_name:
+        ps += f" | Where-Object {{ $_.Name -like '*{filter_name}*' -or $_.DisplayName -like '*{filter_name}*' }}"
+    if state_filter:
+        ps += f" | Where-Object {{ $_.State -eq '{state_filter}' }}"
+    ps += " | ConvertTo-Json -Compress"
+    r = _run_ps(ps, timeout=30)
     try:
         drivers = json.loads(r["stdout"])
         if isinstance(drivers, dict): drivers = [drivers]
