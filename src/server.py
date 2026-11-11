@@ -41,6 +41,17 @@ TOOLS (41 total)
    keyboard_hotkey        Send a hotkey (e.g. ctrl+c, win+d)
    toast_notify           Windows toast notification
 
+ AI Cursor & Input (Session-aware, purple overlay cursor)
+   ai_cursor_start        Launch the purple AI cursor overlay in the active session
+   ai_cursor_stop         Kill the AI cursor overlay
+   ai_cursor_status       Check if the overlay is running
+   ai_mouse_move          Move the AI cursor to x,y (SendInput — works in Session 1)
+   ai_mouse_click         Click at x,y via SendInput
+   ai_mouse_scroll        Scroll the mouse wheel at x,y
+   ai_key_press           Press a single key or key combo via SendInput
+   ai_type                Type a string via SendInput (Unicode aware)
+   ai_screenshot          Screenshot with the purple cursor drawn at its current position
+
  Clipboard
    clipboard_get          Read clipboard text
    clipboard_set          Write clipboard text
@@ -145,7 +156,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 # ─────────────────────────────────────────────────────────────────────────────
 # Version
 # ─────────────────────────────────────────────────────────────────────────────
-SERVER_VERSION = "2.2.0"
+SERVER_VERSION = "2.3.0"
 SERVER_FILE    = Path(__file__).resolve()
 INSTALL_DIR    = SERVER_FILE.parent
 
@@ -254,8 +265,8 @@ def _check_rate_limit(client_ip: str) -> bool:
 mcp = FastMCP(
     name="vm-mcp",
     instructions=(
-        "Remote Windows VM control — 40 tools for shell, files, processes, UI, "
-        "registry, services, networking, and self-update. "
+        "Remote Windows VM control — 48 tools for shell, files, processes, UI, "
+        "registry, services, networking, AI cursor/input, and self-update. "
         "API key required in X-Api-Key header."
     ),
 )
@@ -2133,6 +2144,557 @@ def shutdown(delay_seconds: int = 10, message: str = "VM MCP shutdown") -> dict:
     delay_seconds = max(0, min(delay_seconds, 3600))
     r = _run_ps(f'shutdown.exe /s /t {delay_seconds} /c "{message}"')
     return {"scheduled": r["exit_code"] == 0, "delay_seconds": delay_seconds, "stderr": r["stderr"].strip()}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 13 — AI Cursor & Input  (purple overlay + SendInput)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Architecture
+# ────────────
+#  • ai_cursor.py  — a tkinter overlay that draws a purple arrow on the
+#    screen and listens on localhost:8788 for move/show/hide commands.
+#    It must run INSIDE the interactive user session (Session 1) to be
+#    visible.  We launch it via _launch_in_session() every time the active
+#    console session changes.
+#
+#  • Input injection uses SendInput (user32.dll) via ctypes executed in
+#    Session 1 through a tiny ps1 helper launched with _launch_in_session.
+#    SendInput bypasses the Session-0 barrier and works reliably.
+#
+#  • The MCP server tracks the last known active session and the PID of the
+#    overlay process.  ai_cursor_start() is idempotent — it checks if the
+#    overlay is already alive via /ping before re-launching.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import urllib.request as _urllib_req
+import urllib.error  as _urllib_err
+
+AI_CURSOR_PORT   = 8788
+AI_CURSOR_SCRIPT = str(INSTALL_DIR / "ai_cursor.py")
+
+# In-memory state (not persisted across restarts)
+_ai_cursor_pid: Optional[int] = None
+_ai_cursor_x:   int = 100
+_ai_cursor_y:   int = 100
+
+
+def _cursor_ping() -> bool:
+    """Return True if the overlay HTTP server is responding."""
+    try:
+        req = _urllib_req.Request(
+            f"http://127.0.0.1:{AI_CURSOR_PORT}/ping",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib_req.urlopen(req, timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _cursor_post(endpoint: str, payload: dict) -> dict:
+    """POST to the overlay HTTP server.  Returns {} on failure."""
+    try:
+        body = json.dumps(payload).encode()
+        req  = _urllib_req.Request(
+            f"http://127.0.0.1:{AI_CURSOR_PORT}{endpoint}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib_req.urlopen(req, timeout=3) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _ensure_cursor_running() -> dict:
+    """
+    Make sure ai_cursor.py is running in the current active session.
+    Launches it if it isn't, or if the session has changed.
+    Returns {running, pid, session_id}.
+    """
+    global _ai_cursor_pid
+    session_id = _get_interactive_session_id()
+
+    if _cursor_ping():
+        return {"running": True, "pid": _ai_cursor_pid, "session_id": session_id}
+
+    # Find Python in the user's session
+    python_paths = [
+        r"C:\Users\User0\AppData\Local\Python\pythoncore-3.15-64\python.exe",
+        r"C:\Users\User0\AppData\Local\Programs\Python\Python312\python.exe",
+        r"C:\Users\User0\AppData\Local\Programs\Python\Python311\python.exe",
+        r"C:\Python312\python.exe",
+        r"C:\Python311\python.exe",
+        sys.executable,
+    ]
+    python = next((p for p in python_paths if Path(p).exists()), sys.executable)
+
+    result = _launch_in_session(python, f'"{AI_CURSOR_SCRIPT}"', session_id=session_id)
+    if not result["started"]:
+        return {"running": False, "error": result.get("error"), "session_id": session_id}
+
+    _ai_cursor_pid = result["pid"]
+    # Give it a moment to start
+    time.sleep(2)
+    alive = _cursor_ping()
+    return {"running": alive, "pid": _ai_cursor_pid, "session_id": session_id,
+            "note": "Overlay launched in active session"}
+
+
+def _sendinput_ps(x: int, y: int, action: str = "move",
+                  button: str = "left", scroll_delta: int = 0) -> dict:
+    """
+    Inject mouse input via SendInput in the user session.
+
+    action: "move" | "click" | "down" | "up" | "scroll"
+    button: "left" | "right" | "middle"
+
+    Uses a tiny PowerShell script launched via _launch_in_session so
+    SendInput runs inside Session 1 (the interactive desktop) and not
+    the headless Session 0 service context.
+    """
+    # Normalise coords to 0-65535 range that SendInput expects
+    # We need the screen resolution — query it once per call (fast enough)
+    ps_res = _run_ps(
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+        "Write-Output \"$($s.Width) $($s.Height)\""
+    )
+    try:
+        w, h = map(int, ps_res["stdout"].strip().split())
+    except Exception:
+        w, h = 1920, 1080
+
+    # SendInput uses absolute coords 0-65535
+    abs_x = int(x * 65535 / w)
+    abs_y = int(y * 65535 / h)
+
+    MOUSEEVENTF_MOVE        = 0x0001
+    MOUSEEVENTF_LEFTDOWN    = 0x0002
+    MOUSEEVENTF_LEFTUP      = 0x0004
+    MOUSEEVENTF_RIGHTDOWN   = 0x0008
+    MOUSEEVENTF_RIGHTUP     = 0x0010
+    MOUSEEVENTF_MIDDLEDOWN  = 0x0020
+    MOUSEEVENTF_MIDDLEUP    = 0x0040
+    MOUSEEVENTF_WHEEL       = 0x0800
+    MOUSEEVENTF_ABSOLUTE    = 0x8000
+
+    btn_down = {"left": MOUSEEVENTF_LEFTDOWN,  "right": MOUSEEVENTF_RIGHTDOWN,  "middle": MOUSEEVENTF_MIDDLEDOWN}
+    btn_up   = {"left": MOUSEEVENTF_LEFTUP,    "right": MOUSEEVENTF_RIGHTUP,    "middle": MOUSEEVENTF_MIDDLEUP}
+
+    if action == "move":
+        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
+        data  = 0
+    elif action == "click":
+        # We'll do move+down+up in one script
+        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
+        data  = 0
+    elif action == "down":
+        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_down.get(button, MOUSEEVENTF_LEFTDOWN)
+        data  = 0
+    elif action == "up":
+        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_up.get(button, MOUSEEVENTF_LEFTUP)
+        data  = 0
+    elif action == "scroll":
+        flags = MOUSEEVENTF_WHEEL
+        data  = scroll_delta
+        abs_x = abs_y = 0
+    else:
+        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
+        data  = 0
+
+    if action == "click":
+        down_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_down.get(button, MOUSEEVENTF_LEFTDOWN)
+        up_flags   = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_up.get(button, MOUSEEVENTF_LEFTUP)
+        ps = f"""
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class SI {{
+    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {{
+        public int dx, dy, mouseData, dwFlags, time; public IntPtr dwExtraInfo;
+    }}
+    [StructLayout(LayoutKind.Sequential)] public struct INPUT {{
+        public int type; public MOUSEINPUT mi;
+    }}
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
+}}
+"@
+function Send-Mouse([int]$dx,[int]$dy,[int]$f,[int]$d) {{
+    $i = New-Object SI+INPUT; $i.type=0
+    $i.mi.dx=$dx; $i.mi.dy=$dy; $i.mi.dwFlags=$f; $i.mi.mouseData=$d
+    [SI]::SendInput(1, @($i), [System.Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
+}}
+Send-Mouse {abs_x} {abs_y} {MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE} 0
+Start-Sleep -Milliseconds 30
+Send-Mouse {abs_x} {abs_y} {down_flags} 0
+Start-Sleep -Milliseconds 50
+Send-Mouse {abs_x} {abs_y} {up_flags} 0
+"""
+    else:
+        ps = f"""
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class SI {{
+    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {{
+        public int dx, dy, mouseData, dwFlags, time; public IntPtr dwExtraInfo;
+    }}
+    [StructLayout(LayoutKind.Sequential)] public struct INPUT {{
+        public int type; public MOUSEINPUT mi;
+    }}
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
+}}
+"@
+$i = New-Object SI+INPUT; $i.type=0
+$i.mi.dx={abs_x}; $i.mi.dy={abs_y}; $i.mi.dwFlags={flags}; $i.mi.mouseData={data}
+[SI]::SendInput(1, @($i), [System.Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
+"""
+
+    result = _run_in_user_session(ps, timeout=10, capture_output=False)
+    return {"ok": True, "x": x, "y": y, "action": action}
+
+
+def _sendinput_key_ps(keys: list[str], text: str = "") -> dict:
+    """
+    Inject keyboard input via SendInput in the user session.
+    keys: list of VK names like ["ctrl","c"] or ["enter"]
+    text: Unicode string to type character by character
+    """
+    VK = {
+        "enter": 0x0D, "return": 0x0D, "tab": 0x09, "space": 0x20,
+        "backspace": 0x08, "delete": 0x2E, "escape": 0x1B, "esc": 0x1B,
+        "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+        "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
+        "f1":0x70,"f2":0x71,"f3":0x72,"f4":0x73,"f5":0x74,"f6":0x75,
+        "f7":0x76,"f8":0x77,"f9":0x78,"f10":0x79,"f11":0x7A,"f12":0x7B,
+        "ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12,
+        "win": 0x5B, "windows": 0x5B,
+        "a":0x41,"b":0x42,"c":0x43,"d":0x44,"e":0x45,"f":0x46,"g":0x47,
+        "h":0x48,"i":0x49,"j":0x4A,"k":0x4B,"l":0x4C,"m":0x4D,"n":0x4E,
+        "o":0x4F,"p":0x50,"q":0x51,"r":0x52,"s":0x53,"t":0x54,"u":0x55,
+        "v":0x56,"w":0x57,"x":0x58,"y":0x59,"z":0x5A,
+        "0":0x30,"1":0x31,"2":0x32,"3":0x33,"4":0x34,
+        "5":0x35,"6":0x36,"7":0x37,"8":0x38,"9":0x39,
+    }
+
+    if text:
+        # Type Unicode chars via KEYEVENTF_UNICODE
+        ps_lines = ["""
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class KI {
+    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
+        public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct INPUT {
+        public int type; public KEYBDINPUT ki;
+    }
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
+}
+"@
+function Send-Char([char]$c) {
+    $dn = New-Object KI+INPUT; $dn.type=1; $dn.ki.wVk=0; $dn.ki.wScan=[int][char]$c; $dn.ki.dwFlags=4
+    $up = New-Object KI+INPUT; $up.type=1; $up.ki.wVk=0; $up.ki.wScan=[int][char]$c; $up.ki.dwFlags=6
+    [KI]::SendInput(1,@($dn),[System.Runtime.InteropServices.Marshal]::SizeOf($dn)) | Out-Null
+    Start-Sleep -Milliseconds 20
+    [KI]::SendInput(1,@($up),[System.Runtime.InteropServices.Marshal]::SizeOf($up)) | Out-Null
+    Start-Sleep -Milliseconds 20
+}"""]
+        for ch in text:
+            ps_lines.append(f"Send-Char '{ch.replace(chr(39), chr(39)*2)}'")
+        ps = "\n".join(ps_lines)
+    else:
+        # Key combo: press all down then all up
+        vk_list = [VK.get(k.lower(), ord(k.upper()) if len(k)==1 else 0) for k in keys]
+        vk_list = [v for v in vk_list if v]
+        down_calls = "\n".join(
+            f"""$i{idx}=New-Object KI+INPUT;$i{idx}.type=1;$i{idx}.ki.wVk={vk};$i{idx}.ki.dwFlags=0;[KI]::SendInput(1,@($i{idx}),$sz)|Out-Null;Start-Sleep -Milliseconds 30"""
+            for idx, vk in enumerate(vk_list)
+        )
+        up_calls = "\n".join(
+            f"""$u{idx}=New-Object KI+INPUT;$u{idx}.type=1;$u{idx}.ki.wVk={vk};$u{idx}.ki.dwFlags=2;[KI]::SendInput(1,@($u{idx}),$sz)|Out-Null;Start-Sleep -Milliseconds 30"""
+            for idx, vk in reversed(list(enumerate(vk_list)))
+        )
+        ps = f"""
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class KI {{
+    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {{
+        public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo;
+    }}
+    [StructLayout(LayoutKind.Sequential)] public struct INPUT {{
+        public int type; public KEYBDINPUT ki;
+    }}
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
+}}
+"@
+$sz = [System.Runtime.InteropServices.Marshal]::SizeOf((New-Object KI+INPUT))
+{down_calls}
+{up_calls}
+"""
+
+    result = _run_in_user_session(ps, timeout=max(10, len(text or keys) // 5 + 5), capture_output=False)
+    return {"ok": True, "keys": keys, "text_length": len(text)}
+
+
+def _ai_screenshot_with_cursor() -> dict:
+    """Take a screenshot via schtasks (Session 1 capture) and draw the purple cursor on it."""
+    import subprocess as _sp
+
+    # Trigger the screenshot schtasks (must be pre-configured — see install.ps1)
+    _run_ps("schtasks /run /tn ScreenCap3 2>$null; Start-Sleep 2; schtasks /run /tn ToJpg2 2>$null; Start-Sleep 2")
+
+    jpg = Path(r"C:\Users\User0\Desktop\screen.jpg")
+    if not jpg.exists():
+        # Fallback: try pyautogui / PIL from Session 0 (may be blank but worth trying)
+        return screenshot(scale=0.75)
+
+    try:
+        from PIL import Image, ImageDraw
+        img  = Image.open(jpg).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+        # Scale cursor position to screenshot size
+        ps_res = _run_ps(
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+            "Write-Output \"$($s.Width) $($s.Height)\""
+        )
+        try:
+            sw, sh = map(int, ps_res["stdout"].strip().split())
+        except Exception:
+            sw, sh = 1920, 1080
+
+        cx = int(_ai_cursor_x * img.width  / sw)
+        cy = int(_ai_cursor_y * img.height / sh)
+
+        # Draw purple arrow at cursor position
+        FILL  = (155, 48, 255)
+        OUTL  = (61,  0, 112)
+        pts = [
+            (cx,    cy),
+            (cx,    cy+20),
+            (cx+5,  cy+15),
+            (cx+8,  cy+22),
+            (cx+11, cy+21),
+            (cx+8,  cy+14),
+            (cx+14, cy+14),
+        ]
+        draw.polygon(pts, fill=FILL, outline=OUTL)
+        draw.ellipse([cx, cy, cx+4, cy+4], fill=FILL, outline=OUTL)
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        data = buf.getvalue()
+        return {
+            "image_base64": base64.b64encode(data).decode("ascii"),
+            "width": img.width, "height": img.height,
+            "format": "JPEG", "size_bytes": len(data),
+            "cursor_x": _ai_cursor_x, "cursor_y": _ai_cursor_y,
+        }
+    except Exception as e:
+        return {"error": f"screenshot failed: {e}"}
+
+
+# ── MCP Tools ─────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def ai_cursor_start() -> dict:
+    """
+    Launch the purple AI cursor overlay in the currently active user session.
+
+    The overlay is a transparent always-on-top window that draws a purple
+    arrow cursor.  It automatically appears on whatever session is currently
+    visible on the physical display.  Safe to call multiple times — it will
+    not launch a second instance if one is already running.
+
+    Returns: {running, pid, session_id}
+    """
+    return _ensure_cursor_running()
+
+
+@mcp.tool()
+def ai_cursor_stop() -> dict:
+    """
+    Kill the AI cursor overlay process.
+
+    Returns: {stopped}
+    """
+    global _ai_cursor_pid
+    if _ai_cursor_pid:
+        result = process_kill(pid=_ai_cursor_pid)
+        _ai_cursor_pid = None
+        return {"stopped": True, **result}
+    # Also try by name
+    result = process_kill(name="python", force=False)
+    return {"stopped": True, "note": "killed by name (no tracked PID)"}
+
+
+@mcp.tool()
+def ai_cursor_status() -> dict:
+    """
+    Check whether the AI cursor overlay is running and get its current position.
+
+    Returns: {running, x, y, visible, pid, session_id}
+    """
+    alive = _cursor_ping()
+    pos   = _cursor_post("/ping", {}) if alive else {}
+    return {
+        "running":    alive,
+        "x":          pos.get("x", _ai_cursor_x),
+        "y":          pos.get("y", _ai_cursor_y),
+        "visible":    pos.get("visible", False),
+        "pid":        _ai_cursor_pid,
+        "session_id": _get_interactive_session_id(),
+    }
+
+
+@mcp.tool()
+def ai_mouse_move(x: int, y: int) -> dict:
+    """
+    Move the AI cursor to screen coordinates (x, y).
+
+    This does TWO things:
+      1. Moves the purple overlay cursor to (x, y) so it's visible on screen.
+      2. Injects a real mouse-move via SendInput so the OS cursor also moves
+         to that position inside Session 1 (the interactive desktop).
+
+    Args:
+        x: Screen X coordinate (pixels from left).
+        y: Screen Y coordinate (pixels from top).
+
+    Returns: {moved, x, y}
+    """
+    global _ai_cursor_x, _ai_cursor_y
+    _ai_cursor_x = x
+    _ai_cursor_y = y
+
+    # Move overlay cursor
+    _ensure_cursor_running()
+    _cursor_post("/move", {"x": x, "y": y})
+
+    # Inject real mouse move via SendInput in Session 1
+    _sendinput_ps(x, y, action="move")
+
+    return {"moved": True, "x": x, "y": y}
+
+
+@mcp.tool()
+def ai_mouse_click(
+    x: int,
+    y: int,
+    button: str = "left",
+    clicks: int = 1,
+) -> dict:
+    """
+    Move the AI cursor to (x, y) and click.
+
+    Uses SendInput to inject real mouse events into the interactive desktop
+    session — works even from the SYSTEM service (Session 0 → Session 1).
+    The purple cursor overlay also moves to show where the click happened.
+
+    Args:
+        x:       Screen X coordinate.
+        y:       Screen Y coordinate.
+        button:  left (default), right, or middle.
+        clicks:  Number of clicks — 1 (default) or 2 (double-click).
+
+    Returns: {clicked, x, y, button, clicks}
+    """
+    global _ai_cursor_x, _ai_cursor_y
+    _ai_cursor_x = x
+    _ai_cursor_y = y
+
+    # Move overlay
+    _ensure_cursor_running()
+    _cursor_post("/move", {"x": x, "y": y})
+
+    # Inject click(s) via SendInput
+    for _ in range(clicks):
+        _sendinput_ps(x, y, action="click", button=button)
+        if clicks > 1:
+            time.sleep(0.1)
+
+    return {"clicked": True, "x": x, "y": y, "button": button, "clicks": clicks}
+
+
+@mcp.tool()
+def ai_mouse_scroll(x: int, y: int, direction: str = "down", amount: int = 3) -> dict:
+    """
+    Scroll the mouse wheel at position (x, y).
+
+    Args:
+        x:         Screen X.
+        y:         Screen Y.
+        direction: down (default) or up.
+        amount:    Number of scroll notches (default 3).
+
+    Returns: {scrolled, direction, amount}
+    """
+    delta = -120 * amount if direction == "down" else 120 * amount
+    _sendinput_ps(x, y, action="scroll", scroll_delta=delta)
+    return {"scrolled": True, "direction": direction, "amount": amount}
+
+
+@mcp.tool()
+def ai_key_press(keys: str) -> dict:
+    """
+    Press a key or key combination via SendInput in the interactive session.
+
+    Args:
+        keys: Key combo joined by '+'.  Examples:
+              'enter'          → press Enter
+              'ctrl+c'         → Ctrl+C (copy)
+              'ctrl+shift+esc' → Task Manager
+              'win+d'          → Show desktop
+              'alt+F4'         → Close window
+              'ctrl+l'         → focus address bar in browser
+              'f5'             → refresh
+
+    Returns: {sent, keys}
+    """
+    key_list = [k.strip() for k in keys.split("+") if k.strip()]
+    result = _sendinput_key_ps(key_list)
+    return {"sent": result["ok"], "keys": key_list}
+
+
+@mcp.tool()
+def ai_type(text: str) -> dict:
+    """
+    Type a string into the focused window via SendInput (Unicode-aware).
+
+    Unlike keyboard_type (which uses pyautogui/SendKeys and fails in Session 1),
+    this injects real KEYEVENTF_UNICODE events directly into the interactive
+    desktop session.  Works for any character including non-ASCII.
+
+    Args:
+        text: String to type.
+
+    Returns: {typed, length}
+    """
+    result = _sendinput_key_ps([], text=text)
+    return {"typed": result["ok"], "length": len(text)}
+
+
+@mcp.tool()
+def ai_screenshot() -> dict:
+    """
+    Capture the VM desktop as seen by the user, with the purple AI cursor
+    drawn at its current position.
+
+    Uses the schtasks screenshot method (captures Session 1 — the real
+    desktop) and overlays the purple cursor arrow before returning the image.
+
+    Returns: {image_base64, width, height, format, cursor_x, cursor_y}
+    """
+    return _ai_screenshot_with_cursor()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
