@@ -127,6 +127,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+# Fix stdout encoding for Windows consoles that default to cp1252
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import httpx
 from fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
