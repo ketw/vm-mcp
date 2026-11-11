@@ -145,7 +145,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 # ─────────────────────────────────────────────────────────────────────────────
 # Version
 # ─────────────────────────────────────────────────────────────────────────────
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.2.0"
 SERVER_FILE    = Path(__file__).resolve()
 INSTALL_DIR    = SERVER_FILE.parent
 
@@ -333,70 +333,175 @@ def _run_ps(command: str, timeout: int = SHELL_TIMEOUT, elevated: bool = False) 
         "exit_code": result.returncode,
     }
 
+def _get_interactive_session_id() -> int:
+    """Return the active console session ID (the one shown on the physical display)."""
+    wts = ctypes.WinDLL("wtsapi32.dll", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+    # WTSGetActiveConsoleSessionId returns the session attached to the physical console
+    kernel32.WTSGetActiveConsoleSessionId.restype = ctypes.c_uint32
+    return kernel32.WTSGetActiveConsoleSessionId()
+
+
+def _launch_in_session(exe: str, args: str = "", session_id: Optional[int] = None) -> dict:
+    """
+    Launch a process directly into the interactive user desktop session using
+    WTSQueryUserToken + DuplicateTokenEx + CreateProcessAsUser via ctypes.
+
+    This is the correct way to show windows on the physical display from a
+    Session-0 service. No schtasks, no PowerShell wrapper — the process
+    appears directly in the user's desktop session.
+
+    Returns: {started, pid, error}
+    """
+    import ctypes.wintypes
+
+    wtsapi32  = ctypes.WinDLL("wtsapi32.dll",  use_last_error=True)
+    advapi32  = ctypes.WinDLL("advapi32.dll",  use_last_error=True)
+    kernel32  = ctypes.WinDLL("kernel32.dll",  use_last_error=True)
+    userenv   = ctypes.WinDLL("userenv.dll",   use_last_error=True)
+
+    # --- determine session ---
+    if session_id is None:
+        session_id = kernel32.WTSGetActiveConsoleSessionId()
+
+    # --- WTSQueryUserToken ---
+    user_token = ctypes.wintypes.HANDLE()
+    if not wtsapi32.WTSQueryUserToken(ctypes.c_uint32(session_id), ctypes.byref(user_token)):
+        err = ctypes.get_last_error()
+        return {"started": False, "pid": None, "error": f"WTSQueryUserToken failed: {err}"}
+
+    # --- DuplicateTokenEx (PRIMARY token, full access) ---
+    TOKEN_ALL_ACCESS = 0xF01FF
+    SecurityImpersonation = 2
+    TokenPrimary = 1
+    dup_token = ctypes.wintypes.HANDLE()
+    ok = advapi32.DuplicateTokenEx(
+        user_token, TOKEN_ALL_ACCESS, None,
+        SecurityImpersonation, TokenPrimary,
+        ctypes.byref(dup_token),
+    )
+    kernel32.CloseHandle(user_token)
+    if not ok:
+        err = ctypes.get_last_error()
+        return {"started": False, "pid": None, "error": f"DuplicateTokenEx failed: {err}"}
+
+    # --- CreateEnvironmentBlock ---
+    env_block = ctypes.c_void_p()
+    userenv.CreateEnvironmentBlock(ctypes.byref(env_block), dup_token, False)
+
+    # --- STARTUPINFOW ---
+    class STARTUPINFOW(ctypes.Structure):
+        _fields_ = [
+            ("cb",              ctypes.c_uint32),
+            ("lpReserved",      ctypes.c_wchar_p),
+            ("lpDesktop",       ctypes.c_wchar_p),
+            ("lpTitle",         ctypes.c_wchar_p),
+            ("dwX",             ctypes.c_uint32),
+            ("dwY",             ctypes.c_uint32),
+            ("dwXSize",         ctypes.c_uint32),
+            ("dwYSize",         ctypes.c_uint32),
+            ("dwXCountChars",   ctypes.c_uint32),
+            ("dwYCountChars",   ctypes.c_uint32),
+            ("dwFillAttribute", ctypes.c_uint32),
+            ("dwFlags",         ctypes.c_uint32),
+            ("wShowWindow",     ctypes.c_uint16),
+            ("cbReserved2",     ctypes.c_uint16),
+            ("lpReserved2",     ctypes.c_void_p),
+            ("hStdInput",       ctypes.wintypes.HANDLE),
+            ("hStdOutput",      ctypes.wintypes.HANDLE),
+            ("hStdError",       ctypes.wintypes.HANDLE),
+        ]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("hProcess",    ctypes.wintypes.HANDLE),
+            ("hThread",     ctypes.wintypes.HANDLE),
+            ("dwProcessId", ctypes.c_uint32),
+            ("dwThreadId",  ctypes.c_uint32),
+        ]
+
+    si = STARTUPINFOW()
+    si.cb        = ctypes.sizeof(si)
+    si.lpDesktop = "winsta0\\default"
+    pi = PROCESS_INFORMATION()
+
+    # CREATE_UNICODE_ENVIRONMENT = 0x400, NORMAL_PRIORITY_CLASS = 0x20
+    CREATE_FLAGS = 0x00000420
+
+    cmd_line = f'"{exe}"' if not args else f'"{exe}" {args}'
+
+    ok = advapi32.CreateProcessAsUserW(
+        dup_token,
+        exe,
+        cmd_line,
+        None, None, False,
+        CREATE_FLAGS,
+        env_block,
+        None,
+        ctypes.byref(si),
+        ctypes.byref(pi),
+    )
+
+    last_err = ctypes.get_last_error()
+    userenv.DestroyEnvironmentBlock(env_block)
+    kernel32.CloseHandle(dup_token)
+
+    if ok:
+        pid = pi.dwProcessId
+        kernel32.CloseHandle(pi.hProcess)
+        kernel32.CloseHandle(pi.hThread)
+        return {"started": True, "pid": pid, "error": None}
+    else:
+        return {"started": False, "pid": None, "error": f"CreateProcessAsUserW failed: {last_err}"}
+
+
 def _run_in_user_session(
     command: str,
     timeout: int = 30,
     capture_output: bool = True,
-    username: str = "User0",
+    session_id: Optional[int] = None,
 ) -> dict:
     """
-    Run a PowerShell command inside the interactive user desktop session via
-    a one-shot scheduled task running as `username`.  Unlike _run_ps / shell_run
-    (which execute inside the service's Session 0), this produces windows that
-    are VISIBLE on the user's physical display.
+    Run a PowerShell command in the interactive user desktop session.
 
-    When capture_output=True the stdout/stderr are written to a temp file and
-    returned.  When False the task is fire-and-forget and stdout/stderr are "".
+    For fire-and-forget GUI launches (capture_output=False) this calls
+    _launch_in_session directly — no schtasks, no wrapper process.
+
+    For captured output, it writes a temp .ps1, launches it via
+    _launch_in_session, waits, and reads the output file.
 
     Returns: {stdout, stderr, exit_code}
     """
-    task = f"VmMcpUsr_{datetime.now().strftime('%H%M%S%f')}"
-    if capture_output:
-        out = Path(tempfile.mktemp(suffix=".txt"))
-        script_body = (
-            f"$ErrorActionPreference='Continue'\n"
-            f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
-            f"{command}\n"
-            f'| Out-File -FilePath "{out}" -Encoding utf8 -Append\n'
-        )
-        # Wrap so both stdout-producing and non-producing commands work
-        script_body = (
-            f"$ErrorActionPreference='Continue'\n"
-            f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
-            f"$_vmout = (& {{{command}}} 2>&1 | Out-String)\n"
-            f'$_vmout | Out-File -FilePath "{out}" -Encoding utf8\n'
-        )
-    else:
-        out = None
-        script_body = (
-            f"$ErrorActionPreference='Continue'\n"
-            f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
-            f"{command}\n"
-        )
+    if not capture_output:
+        # Fire-and-forget: launch PowerShell with the command directly
+        result = _launch_in_session(PWSH,
+            f'-ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -Command {command}',
+            session_id=session_id)
+        return {"stdout": "", "stderr": result.get("error") or "", "exit_code": 0 if result["started"] else 1}
 
+    # Captured: write script, launch it, wait, read output
+    out    = Path(tempfile.mktemp(suffix=".txt"))
     script = Path(tempfile.mktemp(suffix=".ps1"))
+    script_body = (
+        "$ErrorActionPreference='Continue'\n"
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
+        f"$_vmout = (& {{{command}}} 2>&1 | Out-String)\n"
+        f'$_vmout | Out-File -FilePath "{out}" -Encoding utf8\n'
+    )
     script.write_text(script_body, encoding="utf-8-sig")
-
     try:
-        # Create the task to run as the interactive user (not SYSTEM)
-        subprocess.run(
-            f'"{SCHTASKS}" /Create /TN "{task}" /TR '
-            f'"{PWSH} -ExecutionPolicy Bypass -NonInteractive -File \\"{script}\\"" '
-            f'/SC ONCE /ST 00:00 /RU "{username}" /F',
-            shell=True, capture_output=True,
+        result = _launch_in_session(
+            PWSH,
+            f'-ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "{script}"',
+            session_id=session_id,
         )
-        subprocess.run(f'"{SCHTASKS}" /Run /TN "{task}"', shell=True, capture_output=True)
+        if not result["started"]:
+            return {"stdout": "", "stderr": result.get("error", "launch failed"), "exit_code": 1}
         time.sleep(min(timeout, 60))
-        subprocess.run(f'"{SCHTASKS}" /Delete /TN "{task}" /F', shell=True, capture_output=True)
-
-        if capture_output and out and out.exists():
-            stdout = out.read_text(encoding="utf-8-sig", errors="replace").rstrip("\n")
-        else:
-            stdout = ""
+        stdout = out.read_text(encoding="utf-8-sig", errors="replace").rstrip("\n") if out.exists() else ""
     finally:
         script.unlink(missing_ok=True)
-        if out:
-            out.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
 
     return {"stdout": stdout, "stderr": "", "exit_code": 0}
 
@@ -512,15 +617,14 @@ def shell_run_interactive(
     command: str,
     timeout_seconds: int = 30,
     capture_output: bool = True,
-    username: str = "User0",
 ) -> dict:
     """
     Run a PowerShell command in the INTERACTIVE user desktop session.
 
     Unlike shell_run (which runs in the service's Session 0 and cannot show
-    windows), this bridges the Session-0 boundary via a scheduled task running
-    as the named user.  Any GUI launched by the command will be VISIBLE on the
-    physical display.
+    windows), this bridges the Session-0 boundary via CreateProcessAsUser,
+    targeting the active console session directly.  Any GUI launched by the
+    command will be VISIBLE on the physical display.
 
     Use shell_run for headless/background work.
     Use shell_run_interactive when you need windows to actually appear, or when
@@ -528,9 +632,8 @@ def shell_run_interactive(
 
     Args:
         command:         PowerShell command or script block.
-        timeout_seconds: How long to wait for the task to finish (max 120 s).
+        timeout_seconds: How long to wait for output (max 120 s). Only used when capture_output=True.
         capture_output:  Return stdout (True, default) or fire-and-forget (False).
-        username:        Windows username for the interactive session (default User0).
 
     Returns: {stdout, stderr, exit_code}
     """
@@ -538,7 +641,6 @@ def shell_run_interactive(
         command,
         timeout=min(timeout_seconds, 120),
         capture_output=capture_output,
-        username=username,
     )
 
 
@@ -944,17 +1046,15 @@ def process_start(
     Returns: {pid, started}
     """
     if interactive:
-        # Build the Start-Process command to run in the user's visible session
-        cmd = f'Start-Process -FilePath "{executable}"'
-        if arguments:
-            # ArgumentList expects an array for safety; wrap in parens
-            escaped = arguments.replace("'", "''")
-            cmd += f" -ArgumentList '{escaped}'"
-        if working_directory:
-            cmd += f' -WorkingDirectory "{working_directory}"'
-        result = _run_in_user_session(cmd, timeout=5, capture_output=False)
-        return {"started": True, "pid": None, "interactive": True,
-                "note": "Launched in interactive user session — window will be visible on desktop"}
+        # Launch directly into the interactive user session via CreateProcessAsUser
+        result = _launch_in_session(executable, arguments or "")
+        return {
+            "started": result["started"],
+            "pid": result["pid"],
+            "interactive": True,
+            "error": result.get("error"),
+            "note": "Launched in interactive user session — window will be visible on desktop" if result["started"] else "Launch failed",
+        }
 
     # Headless / Session-0 launch (original behaviour)
     style = "-WindowStyle Hidden" if hidden else ""
