@@ -6,12 +6,13 @@ Runs on the target Windows VM. Exposes every tool over HTTP/SSE so
 any MCP client (Kiro CLI, Claude Desktop, etc.) can connect from the
 internet and fully remote-control the machine.
 
-TOOLS (40 total)
+TOOLS (41 total)
 ────────────────
  Shell & execution
-   shell_run              PowerShell command → stdout/stderr/exit_code
+   shell_run              PowerShell command → stdout/stderr/exit_code (Session 0 / headless)
    shell_run_elevated     Same but as SYSTEM via scheduled-task trick
    shell_run_bg           Fire-and-forget background command (no wait)
+   shell_run_interactive  Run in the interactive user desktop session (windows VISIBLE on screen)
    winget_install         Install software via winget package manager
    winget_search          Search winget catalogue
    winget_list            List installed packages
@@ -29,7 +30,7 @@ TOOLS (40 total)
 
  Processes
    process_list           List running processes (name, pid, cpu%, mem)
-   process_start          Start a new process
+   process_start          Start a new process (interactive=True to show on desktop)
    process_kill           Kill process by PID or name
 
  UI & desktop
@@ -144,7 +145,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 # ─────────────────────────────────────────────────────────────────────────────
 # Version
 # ─────────────────────────────────────────────────────────────────────────────
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 SERVER_FILE    = Path(__file__).resolve()
 INSTALL_DIR    = SERVER_FILE.parent
 
@@ -332,6 +333,74 @@ def _run_ps(command: str, timeout: int = SHELL_TIMEOUT, elevated: bool = False) 
         "exit_code": result.returncode,
     }
 
+def _run_in_user_session(
+    command: str,
+    timeout: int = 30,
+    capture_output: bool = True,
+    username: str = "User0",
+) -> dict:
+    """
+    Run a PowerShell command inside the interactive user desktop session via
+    a one-shot scheduled task running as `username`.  Unlike _run_ps / shell_run
+    (which execute inside the service's Session 0), this produces windows that
+    are VISIBLE on the user's physical display.
+
+    When capture_output=True the stdout/stderr are written to a temp file and
+    returned.  When False the task is fire-and-forget and stdout/stderr are "".
+
+    Returns: {stdout, stderr, exit_code}
+    """
+    task = f"VmMcpUsr_{datetime.now().strftime('%H%M%S%f')}"
+    if capture_output:
+        out = Path(tempfile.mktemp(suffix=".txt"))
+        script_body = (
+            f"$ErrorActionPreference='Continue'\n"
+            f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
+            f"{command}\n"
+            f'| Out-File -FilePath "{out}" -Encoding utf8 -Append\n'
+        )
+        # Wrap so both stdout-producing and non-producing commands work
+        script_body = (
+            f"$ErrorActionPreference='Continue'\n"
+            f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
+            f"$_vmout = (& {{{command}}} 2>&1 | Out-String)\n"
+            f'$_vmout | Out-File -FilePath "{out}" -Encoding utf8\n'
+        )
+    else:
+        out = None
+        script_body = (
+            f"$ErrorActionPreference='Continue'\n"
+            f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
+            f"{command}\n"
+        )
+
+    script = Path(tempfile.mktemp(suffix=".ps1"))
+    script.write_text(script_body, encoding="utf-8-sig")
+
+    try:
+        # Create the task to run as the interactive user (not SYSTEM)
+        subprocess.run(
+            f'"{SCHTASKS}" /Create /TN "{task}" /TR '
+            f'"{PWSH} -ExecutionPolicy Bypass -NonInteractive -File \\"{script}\\"" '
+            f'/SC ONCE /ST 00:00 /RU "{username}" /F',
+            shell=True, capture_output=True,
+        )
+        subprocess.run(f'"{SCHTASKS}" /Run /TN "{task}"', shell=True, capture_output=True)
+        time.sleep(min(timeout, 60))
+        subprocess.run(f'"{SCHTASKS}" /Delete /TN "{task}" /F', shell=True, capture_output=True)
+
+        if capture_output and out and out.exists():
+            stdout = out.read_text(encoding="utf-8-sig", errors="replace").rstrip("\n")
+        else:
+            stdout = ""
+    finally:
+        script.unlink(missing_ok=True)
+        if out:
+            out.unlink(missing_ok=True)
+
+    return {"stdout": stdout, "stderr": "", "exit_code": 0}
+
+
 def _pyautogui():
     """Import pyautogui lazily; raise ImportError with install hint if missing."""
     try:
@@ -436,6 +505,41 @@ def shell_run_bg(command: str, working_directory: str = "") -> dict:
         **kwargs,
     )
     return {"started": True, "pid": proc.pid}
+
+
+@mcp.tool()
+def shell_run_interactive(
+    command: str,
+    timeout_seconds: int = 30,
+    capture_output: bool = True,
+    username: str = "User0",
+) -> dict:
+    """
+    Run a PowerShell command in the INTERACTIVE user desktop session.
+
+    Unlike shell_run (which runs in the service's Session 0 and cannot show
+    windows), this bridges the Session-0 boundary via a scheduled task running
+    as the named user.  Any GUI launched by the command will be VISIBLE on the
+    physical display.
+
+    Use shell_run for headless/background work.
+    Use shell_run_interactive when you need windows to actually appear, or when
+    the command requires access to the interactive desktop (e.g. UI automation).
+
+    Args:
+        command:         PowerShell command or script block.
+        timeout_seconds: How long to wait for the task to finish (max 120 s).
+        capture_output:  Return stdout (True, default) or fire-and-forget (False).
+        username:        Windows username for the interactive session (default User0).
+
+    Returns: {stdout, stderr, exit_code}
+    """
+    return _run_in_user_session(
+        command,
+        timeout=min(timeout_seconds, 120),
+        capture_output=capture_output,
+        username=username,
+    )
 
 
 @mcp.tool()
@@ -822,18 +926,37 @@ def process_start(
     arguments: str = "",
     working_directory: str = "",
     hidden: bool = False,
+    interactive: bool = False,
 ) -> dict:
     """
     Start a new process.
 
     Args:
-        executable: Path to executable (e.g. C:\\Nemo\\NemoCLI.exe).
+        executable: Path to executable (e.g. C:\\Windows\\System32\\notepad.exe).
         arguments: Command-line arguments string.
         working_directory: Optional working directory.
-        hidden: If True, start with hidden window style.
+        hidden: If True, start with hidden window style (headless/background).
+        interactive: If True, launch in the interactive user desktop session so
+                     the window is VISIBLE on the physical display.  Uses a
+                     scheduled-task bridge to cross the Session-0 boundary.
+                     Cannot be combined with hidden=True.
 
     Returns: {pid, started}
     """
+    if interactive:
+        # Build the Start-Process command to run in the user's visible session
+        cmd = f'Start-Process -FilePath "{executable}"'
+        if arguments:
+            # ArgumentList expects an array for safety; wrap in parens
+            escaped = arguments.replace("'", "''")
+            cmd += f" -ArgumentList '{escaped}'"
+        if working_directory:
+            cmd += f' -WorkingDirectory "{working_directory}"'
+        result = _run_in_user_session(cmd, timeout=5, capture_output=False)
+        return {"started": True, "pid": None, "interactive": True,
+                "note": "Launched in interactive user session — window will be visible on desktop"}
+
+    # Headless / Session-0 launch (original behaviour)
     style = "-WindowStyle Hidden" if hidden else ""
     cmd = f'Start-Process -FilePath "{executable}"'
     if arguments:
