@@ -39,6 +39,13 @@ if ($svc) {
 }
 
 # ---------------------------------------------------------------------------
+# Stop the desktop agent (AI cursor process) so install files are not locked
+# ---------------------------------------------------------------------------
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*vmmcp.computer.agent*" } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Host "  Stopped desktop agent (pid $($_.ProcessId))." -ForegroundColor Green }
+
+# ---------------------------------------------------------------------------
 # Remove scheduled task (fallback path)
 # ---------------------------------------------------------------------------
 $task = Get-ScheduledTask -TaskName $SERVICE_NAME -ErrorAction SilentlyContinue

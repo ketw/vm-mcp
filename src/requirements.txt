@@ -6,24 +6,22 @@
 #
 # The two-step install is handled automatically by install.ps1.
 # pyyaml must be installed first with --no-build-isolation so pip uses the
-# pure-Python fallback instead of trying to compile the C extension (which
-# requires Visual C++ Build Tools and fails on clean VMs).
+# pure-Python fallback instead of compiling the C extension (needs Visual C++).
 # ---------------------------------------------------------------------------
 
-# Core MCP framework + HTTP server
-fastmcp>=2.3.0
+# MCP framework + HTTP server
+fastmcp>=2.10.0
 uvicorn[standard]>=0.30.0
 starlette>=0.40.0
 
 # HTTP client (download_file, server_update, public IP lookup)
 httpx>=0.27.0
 
-# Desktop screenshot + UI automation
-Pillow>=10.0.0
-pyautogui>=0.9.54
+# Computer use: screen capture + AI cursor rendering (the desktop agent needs ONLY Pillow)
+Pillow>=10.1.0
 
 # Process & system metrics
 psutil>=6.0.0
 
-# Windows-specific (winreg, COM)
+# Windows-specific (winreg is stdlib; pywin32 kept for COM-based tools)
 pywin32>=306

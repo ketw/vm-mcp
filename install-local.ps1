@@ -65,15 +65,11 @@ Write-Host "  Python: $pythonExe" -ForegroundColor Green
 Write-Host "[2/6] Setting up install dir: $InstallDir..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
-# Copy server.py and requirements.txt from repo
-$srcServer = Join-Path $SCRIPT_DIR "src\server.py"
-$srcReqs   = Join-Path $SCRIPT_DIR "src\requirements.txt"
-if (-not (Test-Path $srcServer)) { $srcServer = Join-Path $SCRIPT_DIR "server.py" }
-if (-not (Test-Path $srcReqs))   { $srcReqs   = Join-Path $SCRIPT_DIR "requirements.txt" }
-
-Copy-Item $srcServer (Join-Path $InstallDir "server.py") -Force
-if (Test-Path $srcReqs) { Copy-Item $srcReqs (Join-Path $InstallDir "requirements.txt") -Force }
-Write-Host "  Copied server.py" -ForegroundColor Green
+# Copy the whole src tree (server.py entry point + vmmcp/ package + requirements.txt)
+$srcDir = Join-Path $SCRIPT_DIR "src"
+if (-not (Test-Path (Join-Path $srcDir "server.py"))) { $srcDir = $SCRIPT_DIR }
+Copy-Item -Path (Join-Path $srcDir "*") -Destination $InstallDir -Recurse -Force
+Write-Host "  Copied server.py + vmmcp package" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # 3. Dependencies
@@ -84,7 +80,7 @@ if (Test-Path $reqsPath) {
     & $pythonExe -m pip install -r $reqsPath --prefer-binary -q
 } else {
     # Minimal deps if no requirements.txt
-    & $pythonExe -m pip install fastmcp uvicorn starlette httpx Pillow pyautogui psutil pywin32 -q
+    & $pythonExe -m pip install fastmcp uvicorn starlette httpx Pillow psutil pywin32 -q
 }
 Write-Host "  Dependencies installed." -ForegroundColor Green
 

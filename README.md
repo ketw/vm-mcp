@@ -1,158 +1,73 @@
-# vm-mcp — Remote Windows VM Control via MCP  `v2.0`
+# vm-mcp — Remote Windows VM Control + AI Computer Use via MCP  `v3.0`
 
-A Python MCP server that runs on your Windows VM and exposes it as a rich set
-of tools Kiro CLI (or any MCP client) can call from anywhere over the internet.
+A Python MCP server that runs on a Windows machine and lets any MCP client (Kiro CLI, Claude Desktop, your local
+AI…) run commands **and see/operate the desktop** with a visible, animated AI cursor.
+
+![AI cursor demo](assets/cursor/preview.gif)
 
 ```
-┌─────────────────────────────┐         ┌──────────────────────────────────┐
-│   Your machine (Kiro CLI)   │  HTTPS  │   Windows VM (vm-mcp server)     │
-│                             │  SSE    │                                  │
-│  mcp.json → vm-mcp ─────────┼────────▶│  40 tools over HTTP/SSE          │
-│                             │         │  ├─ Shell (run, elevated, bg)    │
-│  "run nemo status on VM"    │         │  ├─ Files (read/write/hash/zip)  │
-│  "take a screenshot"        │         │  ├─ Processes (list/start/kill)  │
-│  "install this .exe"        │         │  ├─ UI (screenshot/mouse/keys)   │
-│  "read the registry"        │         │  ├─ Registry (read/write/list)   │
-│  "port-scan 192.168.1.x"    │         │  ├─ Services (list/start/stop)   │
-│  "update the server itself" │         │  ├─ Network (ping/scan/firewall) │
-└─────────────────────────────┘         │  └─ Self-update + restart        │
-                                        └──────────────────────────────────┘
+ AI client ──HTTPS/SSE──▶ MCP server (service, Session 0) ──localhost──▶ Desktop agent (user's desktop)
+                           66 tools                                      ├─ AI cursor overlay (90 fps)
+                           shell/files/registry/…                        ├─ real mouse + keyboard (SendInput)
+                                                                         └─ screenshots / UI tree
 ```
-
----
 
 ## Quick Start
 
-### On the VM (run as Administrator)
+On the VM (run as Administrator): `Set-ExecutionPolicy Bypass -Scope Process; .\install.ps1`
+(no admin / own PC: `.\install-local.ps1 -StartNow`). Behind NAT? `.\tunnel.ps1` gives a public URL.
 
-```powershell
-Set-ExecutionPolicy Bypass -Scope Process
-.\install.ps1
-```
-
-> **Behind NAT** (VMware Workstation default)? Run `.\tunnel.ps1` for a free public URL.
-
-### Add to Kiro CLI
-
-`~/.kiro/settings/mcp.json`:
+Add to your MCP client (`~/.kiro/settings/mcp.json` or equivalent):
 ```json
-{
-  "mcpServers": {
-    "vm-mcp": {
-      "url": "http://<VM-IP>:8765/sse",
-      "headers": { "X-Api-Key": "<key-from-install>" }
-    }
-  }
-}
+{ "mcpServers": { "vm-mcp": { "url": "http://<VM-IP>:8765/sse", "headers": { "X-Api-Key": "<key-from-install>" } } } }
 ```
+Someone must be logged in on the VM console for computer use (it needs a desktop).
 
----
+## Computer use — 14 tools
 
-## Tools — All 40
+Workflow for the AI: **screenshot → act → screenshot**. Every coordinate is a pixel of the latest full screenshot.
 
-### Shell & Execution
-| Tool | Description |
-|------|-------------|
-| `shell_run` | Run PowerShell → stdout / stderr / exit_code |
-| `shell_run_elevated` | Run as SYSTEM via scheduled-task (bcdedit, driver ops) |
-| `shell_run_bg` | Fire-and-forget background process (no wait) |
-| `winget_install` | Install software via winget package manager |
-| `winget_search` | Search the winget catalogue |
-| `winget_list` | List installed packages |
+| Tool | What it does |
+|------|--------------|
+| `screenshot` | Image of the screen. `grid=True` labels coordinates; `region=[x,y,w,h]` zooms; `hide_cursor` |
+| `screen_info` | Text-only: screen size, cursor, front window, window list |
+| `ui_tree` | Accessibility tree of the front window with exact click centres (works without vision) |
+| `mouse_move` | Glide to x,y (hover) |
+| `mouse_click` | left/right/middle, 1–3 clicks, optional modifiers (`["ctrl"]`) |
+| `mouse_drag` | Press at A, move to B (optional waypoints), release |
+| `mouse_hold` | Press and hold for N seconds |
+| `mouse_button` | Low-level `down` / `up` for custom gestures |
+| `mouse_scroll` | up/down/left/right, N notches |
+| `keyboard_type` | Type text (Unicode-safe), optional Enter |
+| `keyboard_key` | `enter`, `ctrl+a`, `alt+f4`, `ctrl+a ctrl+c` … with `repeat` |
+| `window_focus` | Bring a window to front by title |
+| `wait` | Pause with a "thinking" cursor pulse |
+| `cursor_control` | status / show / hide / test the overlay |
 
-### File System
-| Tool | Description |
-|------|-------------|
-| `file_read` | Read file (text or base64 binary) |
-| `file_write` | Write / create file (text or base64 binary) |
-| `file_delete` | Delete file or directory |
-| `file_list` | List directory (recursive, glob pattern) |
-| `file_copy` | Copy file or directory tree |
-| `file_move` | Move / rename file or directory |
-| `file_hash` | SHA256 / MD5 / SHA1 hash of a file |
-| `archive_create` | Zip or tar.gz files/directories |
-| `archive_extract` | Extract zip / tar / 7z archive |
+The cursor is soft white and tints by action (blue click, violet right-click, teal double-click, amber drag/hold,
+sky scroll, mint typing, lavender wait, coral error). Details: [docs/CURSOR.md](docs/CURSOR.md).
+How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-### Processes
-| Tool | Description |
-|------|-------------|
-| `process_list` | List processes (sortable by memory, CPU, name, pid) |
-| `process_start` | Launch a new process |
-| `process_kill` | Kill process by PID or name |
+## Other tools (52)
 
-### UI & Desktop
-| Tool | Description |
-|------|-------------|
-| `screenshot` | Capture desktop (or region) as base64 PNG |
-| `mouse_move` | Move mouse to screen coordinates |
-| `mouse_click` | Left / right / double click at x,y |
-| `keyboard_type` | Type a string with simulated keystrokes |
-| `keyboard_hotkey` | Send hotkey: ctrl+c, win+d, alt+F4, etc. |
-| `toast_notify` | Show Windows toast notification on the VM |
+| Family | Tools |
+|---|---|
+| Shell | `shell_run` `shell_run_elevated` `shell_run_bg` `shell_run_interactive` |
+| Files | `file_read` `file_write` `file_delete` `file_list` `file_copy` `file_move` `file_hash` `archive_create` `archive_extract` |
+| Processes | `process_list` `process_start` `process_kill` |
+| Clipboard | `clipboard_get` `clipboard_set` |
+| Registry | `registry_read` `registry_write` `registry_delete` `registry_list` |
+| Services & tasks | `service_status` `service_control` `service_list` `scheduled_task_list` `scheduled_task_run` |
+| Network | `net_info` `net_ping` `net_port_scan` `net_connections` `firewall_rule_list` `firewall_rule_add` `firewall_rule_remove` |
+| System | `vm_info` `event_log_read` `env_get` `env_set` `installed_drivers` `toast_notify` |
+| Software | `winget_install` `winget_search` `winget_list` `download_file` `install_msi` |
+| Server | `server_version` `server_update` `server_restart` `server_log_tail` |
+| Power | `reboot` `reboot_cancel` `shutdown` |
 
-### Clipboard
-| Tool | Description |
-|------|-------------|
-| `clipboard_get` | Read clipboard text |
-| `clipboard_set` | Write clipboard text |
-
-### Registry
-| Tool | Description |
-|------|-------------|
-| `registry_read` | Read a value |
-| `registry_write` | Write a value (REG_SZ/DWORD/QWORD/BINARY/MULTI_SZ) |
-| `registry_delete` | Delete a value or entire key |
-| `registry_list` | List subkeys and values in a key |
-
-### Windows Services
-| Tool | Description |
-|------|-------------|
-| `service_status` | Get single service status |
-| `service_control` | Start / stop / restart / pause / resume |
-| `service_list` | List all services (filterable by name and status) |
-
-### Networking
-| Tool | Description |
-|------|-------------|
-| `net_info` | Adapters, IPs, gateway, DNS, public IP |
-| `net_ping` | Ping a host, return latency stats |
-| `net_port_scan` | TCP port scan on a host |
-| `net_connections` | Active TCP connections (filterable by state) |
-| `firewall_rule_list` | List Windows Firewall rules |
-| `firewall_rule_add` | Add a firewall rule |
-| `firewall_rule_remove` | Remove a firewall rule by name |
-
-### System
-| Tool | Description |
-|------|-------------|
-| `vm_info` | OS, CPU, RAM, disk, uptime, public IP |
-| `event_log_read` | Read Windows Event Log (System/Application/Security) |
-| `scheduled_task_list` | List scheduled tasks |
-| `scheduled_task_run` | Run a scheduled task immediately |
-| `env_get` | Read an environment variable |
-| `env_set` | Set / delete a system environment variable |
-| `installed_drivers` | List installed kernel-mode drivers |
-
-### Software
-| Tool | Description |
-|------|-------------|
-| `download_file` | Download URL to local path |
-| `install_msi` | Install MSI / EXE silently (URL or local) |
-
-### Server Self-Management
-| Tool | Description |
-|------|-------------|
-| `server_version` | Current version, path, PID, uptime |
-| `server_update` | Fetch latest server.py from GitHub and replace |
-| `server_restart` | Re-exec the server process (applies update) |
-| `server_log_tail` | Tail the server log file |
-
-### Power
-| Tool | Description |
-|------|-------------|
-| `reboot` | Schedule VM reboot (with delay) |
-| `reboot_cancel` | Cancel pending reboot |
-| `shutdown` | Schedule VM shutdown |
+### Removed in v3.0
+`screenshot` (old PowerShell version, blank from Session 0), `mouse_*`/`keyboard_*` (pyautogui versions) and all
+`ai_*` tools (one PowerShell process per mouse move, 0.5–1.5 s each) — replaced by the 14 tools above, now backed by
+one persistent desktop agent (~1 ms per input event). `ai_cursor.py` (Tk overlay) is replaced by the layered-window overlay.
 
 ---
 
@@ -165,15 +80,13 @@ The server can update itself without touching the VM:
 server_update(restart=True)
 
 # Or two steps:
-server_update()           ← downloads new server.py
+server_update()           ← downloads + unpacks new src/
 server_restart()          ← re-execs the process with new code
 ```
 
-The update URL defaults to:
-```
-https://raw.githubusercontent.com/ketw/vm-mcp/master/src/server.py
-```
-Override it by setting `VM_MCP_UPDATE_URL` on the VM before install.
+`server_update` downloads the GitHub repo zip and replaces the whole `src/` tree (server.py + `vmmcp/` package).
+The default URL is the `master` archive: `https://github.com/ketw/vm-mcp/archive/refs/heads/master.zip`.
+Override it with `VM_MCP_UPDATE_URL`. The desktop agent is restarted automatically.
 
 ---
 
@@ -209,7 +122,10 @@ Override it by setting `VM_MCP_UPDATE_URL` on the VM before install.
 | `VM_MCP_SHELL_TIMEOUT` | `120` | Default shell timeout (seconds) |
 | `VM_MCP_ALLOWED_IPS` | *(all)* | Comma-separated IP/CIDR allowlist |
 | `VM_MCP_RATE_LIMIT` | `0` | Max requests/minute per IP (0=off) |
-| `VM_MCP_UPDATE_URL` | GitHub raw URL | URL for server_update() |
+| `VM_MCP_UPDATE_URL` | GitHub master zip | Repo zip used by server_update() |
+| `VM_MCP_AGENT_PORT` | `8788` | Localhost port of the desktop agent |
+| `VM_MCP_SCREENSHOT_MAX_WIDTH` | `1920` | Screenshots wider than this are downscaled |
+| `VM_MCP_AUTO_SCREENSHOT` | `0` | `1` = every mouse/keyboard tool also returns a screenshot |
 | `VM_MCP_LOG` | `<install_dir>/vm-mcp.log` | Log file path |
 
 ---
@@ -227,13 +143,10 @@ python server.py
 
 ## File Structure
 
+See **[AGENTS.md](AGENTS.md)** for the full map. In short:
+
 ```
-vm-mcp/
-├── src/
-│   ├── server.py          ← MCP server (40 tools)
-│   └── requirements.txt   ← Python dependencies
-├── install.ps1            ← One-shot installer (run on VM as admin)
-├── tunnel.ps1             ← ngrok tunnel for VMs behind NAT
-├── uninstall.ps1          ← Full removal
-└── README.md              ← This file
+src/server.py            entry point            src/vmmcp/tools/      one file per tool family
+src/vmmcp/computer/      cursor + vision + input   docs/               ARCHITECTURE.md, CURSOR.md
+assets/cursor/           cursor.svg + previews     tests/               python -m unittest discover -s tests -v
 ```
