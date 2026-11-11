@@ -156,7 +156,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 # ─────────────────────────────────────────────────────────────────────────────
 # Version
 # ─────────────────────────────────────────────────────────────────────────────
-SERVER_VERSION = "2.3.0"
+SERVER_VERSION = "2.3.1"
 SERVER_FILE    = Path(__file__).resolve()
 INSTALL_DIR    = SERVER_FILE.parent
 
@@ -2245,20 +2245,30 @@ def _ensure_cursor_running() -> dict:
             "note": "Overlay launched in active session"}
 
 
+def _run_ps1_in_session(ps_content: str, wait_seconds: float = 1.5) -> dict:
+    """
+    Write ps_content to a temp .ps1 file, launch it via _launch_in_session
+    (so it runs in Session 1 with full desktop access), wait, then delete.
+    This is the ONLY reliable way to run SendInput/SetCursorPos from Session 0.
+    """
+    script = Path(tempfile.mktemp(suffix=".ps1", dir=r"C:\VmMcp"))
+    script.write_text(ps_content, encoding="utf-8-sig")
+    result = _launch_in_session(
+        PWSH,
+        f'-ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "{script}"',
+    )
+    time.sleep(wait_seconds)
+    script.unlink(missing_ok=True)
+    return result
+
+
 def _sendinput_ps(x: int, y: int, action: str = "move",
                   button: str = "left", scroll_delta: int = 0) -> dict:
     """
-    Inject mouse input via SendInput in the user session.
-
-    action: "move" | "click" | "down" | "up" | "scroll"
-    button: "left" | "right" | "middle"
-
-    Uses a tiny PowerShell script launched via _launch_in_session so
-    SendInput runs inside Session 1 (the interactive desktop) and not
-    the headless Session 0 service context.
+    Inject mouse input via SendInput + SetCursorPos in the user session.
+    Writes a temp PS1 and launches it via _launch_in_session (proven working).
     """
-    # Normalise coords to 0-65535 range that SendInput expects
-    # We need the screen resolution — query it once per call (fast enough)
+    # Screen resolution for absolute coord normalisation
     ps_res = _run_ps(
         "Add-Type -AssemblyName System.Windows.Forms; "
         "$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
@@ -2267,101 +2277,93 @@ def _sendinput_ps(x: int, y: int, action: str = "move",
     try:
         w, h = map(int, ps_res["stdout"].strip().split())
     except Exception:
-        w, h = 1920, 1080
+        w, h = 1024, 768
 
-    # SendInput uses absolute coords 0-65535
+    # SendInput absolute coords are 0-65535
     abs_x = int(x * 65535 / w)
     abs_y = int(y * 65535 / h)
 
-    MOUSEEVENTF_MOVE        = 0x0001
-    MOUSEEVENTF_LEFTDOWN    = 0x0002
-    MOUSEEVENTF_LEFTUP      = 0x0004
-    MOUSEEVENTF_RIGHTDOWN   = 0x0008
-    MOUSEEVENTF_RIGHTUP     = 0x0010
-    MOUSEEVENTF_MIDDLEDOWN  = 0x0020
-    MOUSEEVENTF_MIDDLEUP    = 0x0040
-    MOUSEEVENTF_WHEEL       = 0x0800
-    MOUSEEVENTF_ABSOLUTE    = 0x8000
+    MOVE     = 0x0001
+    LDOWN    = 0x0002
+    LUP      = 0x0004
+    RDOWN    = 0x0008
+    RUP      = 0x0010
+    MDOWN    = 0x0020
+    MUP      = 0x0040
+    WHEEL    = 0x0800
+    ABS      = 0x8000
 
-    btn_down = {"left": MOUSEEVENTF_LEFTDOWN,  "right": MOUSEEVENTF_RIGHTDOWN,  "middle": MOUSEEVENTF_MIDDLEDOWN}
-    btn_up   = {"left": MOUSEEVENTF_LEFTUP,    "right": MOUSEEVENTF_RIGHTUP,    "middle": MOUSEEVENTF_MIDDLEUP}
+    btn_down = {"left": LDOWN, "right": RDOWN, "middle": MDOWN}
+    btn_up   = {"left": LUP,   "right": RUP,   "middle": MUP}
+
+    SENDINPUT_CS = r"""
+using System;
+using System.Runtime.InteropServices;
+public class WinInput {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT { public int dx, dy, mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT { public int type; public MOUSEINPUT mi; }
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int cb);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+}
+"""
 
     if action == "move":
-        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
-        data  = 0
+        ps = f"""
+Add-Type @"
+{SENDINPUT_CS}
+"@
+[WinInput]::SetCursorPos({x}, {y}) | Out-Null
+$i = New-Object WinInput+INPUT; $i.type=0
+$i.mi.dx={abs_x}; $i.mi.dy={abs_y}; $i.mi.dwFlags={MOVE|ABS}; $i.mi.mouseData=0
+[WinInput]::SendInput(1, @($i), [System.Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
+"""
     elif action == "click":
-        # We'll do move+down+up in one script
-        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
-        data  = 0
-    elif action == "down":
-        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_down.get(button, MOUSEEVENTF_LEFTDOWN)
-        data  = 0
-    elif action == "up":
-        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_up.get(button, MOUSEEVENTF_LEFTUP)
-        data  = 0
-    elif action == "scroll":
-        flags = MOUSEEVENTF_WHEEL
-        data  = scroll_delta
-        abs_x = abs_y = 0
-    else:
-        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
-        data  = 0
-
-    if action == "click":
-        down_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_down.get(button, MOUSEEVENTF_LEFTDOWN)
-        up_flags   = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | btn_up.get(button, MOUSEEVENTF_LEFTUP)
+        df = MOVE | ABS | btn_down.get(button, LDOWN)
+        uf = MOVE | ABS | btn_up.get(button, LUP)
         ps = f"""
 Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class SI {{
-    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {{
-        public int dx, dy, mouseData, dwFlags, time; public IntPtr dwExtraInfo;
-    }}
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT {{
-        public int type; public MOUSEINPUT mi;
-    }}
-    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
-}}
+{SENDINPUT_CS}
 "@
-function Send-Mouse([int]$dx,[int]$dy,[int]$f,[int]$d) {{
-    $i = New-Object SI+INPUT; $i.type=0
+function Send-MI([int]$dx,[int]$dy,[int]$f,[int]$d) {{
+    $i = New-Object WinInput+INPUT; $i.type=0
     $i.mi.dx=$dx; $i.mi.dy=$dy; $i.mi.dwFlags=$f; $i.mi.mouseData=$d
-    [SI]::SendInput(1, @($i), [System.Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
+    [WinInput]::SendInput(1, @($i), [System.Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
 }}
-Send-Mouse {abs_x} {abs_y} {MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE} 0
-Start-Sleep -Milliseconds 30
-Send-Mouse {abs_x} {abs_y} {down_flags} 0
+[WinInput]::SetCursorPos({x}, {y}) | Out-Null
+Send-MI {abs_x} {abs_y} {MOVE|ABS} 0
 Start-Sleep -Milliseconds 50
-Send-Mouse {abs_x} {abs_y} {up_flags} 0
+Send-MI {abs_x} {abs_y} {df} 0
+Start-Sleep -Milliseconds 80
+Send-MI {abs_x} {abs_y} {uf} 0
+"""
+    elif action == "scroll":
+        ps = f"""
+Add-Type @"
+{SENDINPUT_CS}
+"@
+[WinInput]::SetCursorPos({x}, {y}) | Out-Null
+$i = New-Object WinInput+INPUT; $i.type=0
+$i.mi.dx=0; $i.mi.dy=0; $i.mi.dwFlags={WHEEL}; $i.mi.mouseData={scroll_delta}
+[WinInput]::SendInput(1, @($i), [System.Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
 """
     else:
         ps = f"""
 Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class SI {{
-    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {{
-        public int dx, dy, mouseData, dwFlags, time; public IntPtr dwExtraInfo;
-    }}
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT {{
-        public int type; public MOUSEINPUT mi;
-    }}
-    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
-}}
+{SENDINPUT_CS}
 "@
-$i = New-Object SI+INPUT; $i.type=0
-$i.mi.dx={abs_x}; $i.mi.dy={abs_y}; $i.mi.dwFlags={flags}; $i.mi.mouseData={data}
-[SI]::SendInput(1, @($i), [System.Runtime.InteropServices.Marshal]::SizeOf($i)) | Out-Null
+[WinInput]::SetCursorPos({x}, {y}) | Out-Null
 """
 
-    result = _run_in_user_session(ps, timeout=10, capture_output=False)
+    _run_ps1_in_session(ps, wait_seconds=0.5 if action == "move" else 1.0)
     return {"ok": True, "x": x, "y": y, "action": action}
 
 
 def _sendinput_key_ps(keys: list[str], text: str = "") -> dict:
     """
     Inject keyboard input via SendInput in the user session.
+    Writes a temp PS1 and launches via _launch_in_session (proven working).
     keys: list of VK names like ["ctrl","c"] or ["enter"]
     text: Unicode string to type character by character
     """
@@ -2382,65 +2384,54 @@ def _sendinput_key_ps(keys: list[str], text: str = "") -> dict:
         "5":0x35,"6":0x36,"7":0x37,"8":0x38,"9":0x39,
     }
 
-    if text:
-        # Type Unicode chars via KEYEVENTF_UNICODE
-        ps_lines = ["""
-Add-Type @"
+    KI_CS = r"""
 using System;
 using System.Runtime.InteropServices;
-public class KI {
-    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
-        public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT {
-        public int type; public KEYBDINPUT ki;
-    }
-    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
+public class WinKey {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT { public int type; public KEYBDINPUT ki; }
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int cb);
 }
-"@
-function Send-Char([char]$c) {
-    $dn = New-Object KI+INPUT; $dn.type=1; $dn.ki.wVk=0; $dn.ki.wScan=[int][char]$c; $dn.ki.dwFlags=4
-    $up = New-Object KI+INPUT; $up.type=1; $up.ki.wVk=0; $up.ki.wScan=[int][char]$c; $up.ki.dwFlags=6
-    [KI]::SendInput(1,@($dn),[System.Runtime.InteropServices.Marshal]::SizeOf($dn)) | Out-Null
-    Start-Sleep -Milliseconds 20
-    [KI]::SendInput(1,@($up),[System.Runtime.InteropServices.Marshal]::SizeOf($up)) | Out-Null
-    Start-Sleep -Milliseconds 20
-}"""]
-        for ch in text:
-            ps_lines.append(f"Send-Char '{ch.replace(chr(39), chr(39)*2)}'")
-        ps = "\n".join(ps_lines)
-    else:
-        # Key combo: press all down then all up
-        vk_list = [VK.get(k.lower(), ord(k.upper()) if len(k)==1 else 0) for k in keys]
-        vk_list = [v for v in vk_list if v]
-        down_calls = "\n".join(
-            f"""$i{idx}=New-Object KI+INPUT;$i{idx}.type=1;$i{idx}.ki.wVk={vk};$i{idx}.ki.dwFlags=0;[KI]::SendInput(1,@($i{idx}),$sz)|Out-Null;Start-Sleep -Milliseconds 30"""
-            for idx, vk in enumerate(vk_list)
-        )
-        up_calls = "\n".join(
-            f"""$u{idx}=New-Object KI+INPUT;$u{idx}.type=1;$u{idx}.ki.wVk={vk};$u{idx}.ki.dwFlags=2;[KI]::SendInput(1,@($u{idx}),$sz)|Out-Null;Start-Sleep -Milliseconds 30"""
-            for idx, vk in reversed(list(enumerate(vk_list)))
-        )
-        ps = f"""
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class KI {{
-    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {{
-        public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo;
-    }}
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT {{
-        public int type; public KEYBDINPUT ki;
-    }}
-    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] i, int sz);
-}}
-"@
-$sz = [System.Runtime.InteropServices.Marshal]::SizeOf((New-Object KI+INPUT))
-{down_calls}
-{up_calls}
 """
 
-    result = _run_in_user_session(ps, timeout=max(10, len(text or keys) // 5 + 5), capture_output=False)
+    if text:
+        lines = [f'Add-Type @"\n{KI_CS}\n"@']
+        lines.append("$sz = [System.Runtime.InteropServices.Marshal]::SizeOf((New-Object WinKey+INPUT))")
+        lines.append("""function Send-Char([int]$scan) {
+    $dn = New-Object WinKey+INPUT; $dn.type=1; $dn.ki.wVk=0; $dn.ki.wScan=$scan; $dn.ki.dwFlags=4
+    $up = New-Object WinKey+INPUT; $up.type=1; $up.ki.wVk=0; $up.ki.wScan=$scan; $up.ki.dwFlags=6
+    [WinKey]::SendInput(1,@($dn),$sz) | Out-Null
+    Start-Sleep -Milliseconds 20
+    [WinKey]::SendInput(1,@($up),$sz) | Out-Null
+    Start-Sleep -Milliseconds 20
+}""")
+        for ch in text:
+            lines.append(f"Send-Char {ord(ch)}")
+        ps = "\n".join(lines)
+        wait = max(2.0, len(text) * 0.05)
+    else:
+        vk_list = [VK.get(k.lower(), ord(k.upper()) if len(k)==1 else 0) for k in keys]
+        vk_list = [v for v in vk_list if v]
+        down_lines = "\n".join(
+            f"$d{i}=New-Object WinKey+INPUT;$d{i}.type=1;$d{i}.ki.wVk={vk};$d{i}.ki.dwFlags=0;[WinKey]::SendInput(1,@($d{i}),$sz)|Out-Null;Start-Sleep -Milliseconds 50"
+            for i, vk in enumerate(vk_list)
+        )
+        up_lines = "\n".join(
+            f"$u{i}=New-Object WinKey+INPUT;$u{i}.type=1;$u{i}.ki.wVk={vk};$u{i}.ki.dwFlags=2;[WinKey]::SendInput(1,@($u{i}),$sz)|Out-Null;Start-Sleep -Milliseconds 50"
+            for i, vk in reversed(list(enumerate(vk_list)))
+        )
+        ps = f"""Add-Type @"
+{KI_CS}
+"@
+$sz = [System.Runtime.InteropServices.Marshal]::SizeOf((New-Object WinKey+INPUT))
+{down_lines}
+{up_lines}
+"""
+        wait = 1.0
+
+    _run_ps1_in_session(ps, wait_seconds=wait)
     return {"ok": True, "keys": keys, "text_length": len(text)}
 
 
