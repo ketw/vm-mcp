@@ -23,20 +23,23 @@ def main() -> None:
 
     import uvicorn
     from starlette.applications import Starlette
-    from starlette.middleware import Middleware
     from starlette.routing import Mount
 
     from . import tools  # noqa: F401  (registers every tool)
+    from .activity import store
     from .mcp_instance import mcp
-    from .security import AuthMiddleware
+    from .security import Gate
+    from .webui.app import ui_app
 
-    app = Starlette(routes=[Mount("/", app=mcp.http_app(transport="sse"))],
-                    middleware=[Middleware(AuthMiddleware)])
+    mcp_app = Starlette(routes=[Mount("/", app=mcp.http_app(transport="sse"))])
+    app = Gate(mcp_app, ui_app)                          # auth + rate limit + dashboard + connection tracking
+    store.note("system", f"vm-mcp {VERSION} started", event="start")
     print(f"""
 vm-mcp {VERSION}
   Listening : {HOST}:{PORT}   (SSE: http://<ip>:{PORT}/sse, header X-Api-Key)
   Agent port: 127.0.0.1:{AGENT_PORT} (desktop agent, started on first computer-use call)
+  Dashboard : http://<ip>:{PORT}/ui/   (sign in with the API key)
   Log       : {LOG_FILE}
   Update    : {UPDATE_URL}
 """)
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info", timeout_graceful_shutdown=3)

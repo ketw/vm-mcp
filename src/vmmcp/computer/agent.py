@@ -4,7 +4,7 @@
 
 It owns the AI cursor overlay, real input injection and screen capture, and exposes them
 over a tiny localhost-only JSON/HTTP API that client.py (inside the MCP server) calls.
-Stdlib + Pillow + ctypes only.  Log: %TEMP%\\vm-mcp-agent.log
+Stdlib + Pillow + ctypes only.  Log: %PROGRAMDATA%\\vm-mcp\\agent.log
 """
 
 from __future__ import annotations
@@ -36,20 +36,29 @@ def _set_dpi_awareness() -> float:
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
         except Exception:
             user32.SetProcessDPIAware()
+    scale = 1.0
     try:
-        return max(1.0, user32.GetDpiForSystem() / 96.0)
+        scale = max(1.0, user32.GetDpiForSystem() / 96.0)          # display scaling (125% -> 1.25 ...)
     except Exception:
-        return 1.0
+        pass
+    try:                                                          # Settings > Accessibility > Mouse pointer size
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Cursors") as k:
+            base = int(winreg.QueryValueEx(k, "CursorBaseSize")[0])
+        scale *= max(0.5, base / 32.0)
+    except Exception:
+        pass
+    return scale
 
 
 class AgentState:
-    def __init__(self, token: str, port: int):
+    def __init__(self, token: str, port: int, cursor_px: float = 19.0):
         from . import inputs
         from .actor import Actor
         from .overlay import Overlay
         self.token, self.port = token, port
         self.ui_scale = _set_dpi_awareness_cached()
-        self.overlay = Overlay(self.ui_scale, on_move=inputs.move_abs)
+        self.overlay = Overlay(self.ui_scale, on_move=inputs.move_abs, cursor_px=cursor_px)
         self.overlay.start()
         self.overlay.call(lambda e: (e.place(*inputs.cursor_pos()), e.fade_to(1.0)))
         self.actor = Actor(self.overlay)
@@ -84,7 +93,8 @@ def build_handlers(st: AgentState, shutdown_cb):
 
     def screenshot(p):
         data, meta = a.screenshot(p.get("region"), p.get("out_width"), p.get("label_scale", 1.0), p.get("grid", False),
-                                  p.get("hide_cursor", False), p.get("format", "auto"), p.get("quality", 85))
+                                  p.get("hide_cursor", False), p.get("format", "auto"), p.get("quality", 78),
+                                  p.get("settle", False))
         return {**meta, "image_b64": base64.b64encode(data).decode("ascii")}
 
     def cursor(p):
@@ -159,18 +169,30 @@ def make_server(st: AgentState) -> ThreadingHTTPServer:
     return srv
 
 
+def _setup_log() -> None:
+    """Log to %PROGRAMDATA%\\vm-mcp\\agent.log (the server reads it to explain failures); fall back to TEMP."""
+    fmt = "%(asctime)s %(levelname)s %(message)s"
+    for d in (os.path.join(os.environ.get("PROGRAMDATA", r"C:\\ProgramData"), "vm-mcp"), tempfile.gettempdir()):
+        try:
+            os.makedirs(d, exist_ok=True)
+            logging.basicConfig(filename=os.path.join(d, "agent.log"), level=logging.INFO, format=fmt)
+            return
+        except OSError:
+            continue
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8788)
     ap.add_argument("--token", required=True)
+    ap.add_argument("--cursor-px", type=float, default=19.0)
     args = ap.parse_args()
-    logging.basicConfig(filename=os.path.join(tempfile.gettempdir(), "vm-mcp-agent.log"), level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+    _setup_log()
     try:
-        st = AgentState(args.token, args.port)
+        st = AgentState(args.token, args.port, args.cursor_px)
         srv = make_server(st)
-    except OSError as exc:                      # port busy -> another agent is alive
-        log.error("cannot start: %s", exc)
+    except BaseException as exc:                # port busy, Pillow missing, window creation failed ...
+        log.error("cannot start: %s\n%s", exc, traceback.format_exc())
         sys.exit(2)
     log.info("agent %s up on 127.0.0.1:%d (session %d, ui_scale %.2f)", VERSION, args.port, st.session, st.ui_scale)
     srv.serve_forever()

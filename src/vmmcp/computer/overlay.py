@@ -99,8 +99,10 @@ TARGET_FPS = 90.0
 
 
 class Overlay:
-    def __init__(self, ui_scale: float = 1.0, on_move: Optional[Callable[[int, int], None]] = None):
+    def __init__(self, ui_scale: float = 1.0, on_move: Optional[Callable[[int, int], None]] = None,
+                 cursor_px: float = 19.0):
         self._ui_scale = ui_scale
+        self._cursor_px = cursor_px
         self._on_move = on_move
         self._q: "queue.Queue[Callable[[CursorEngine], None]]" = queue.Queue()
         self._ready = threading.Event()
@@ -167,7 +169,7 @@ class Overlay:
         wc.lpfnWndProc, wc.hInstance, wc.lpszClassName = self._wndproc, hinst, CLASS_NAME
         user32.RegisterClassW(ctypes.byref(wc))           # re-registering after a crash just fails harmlessly
 
-        self.engine = CursorEngine(self._ui_scale, self._on_move)
+        self.engine = CursorEngine(self._ui_scale, self._on_move, self._cursor_px)
         n = self.engine.sp.canvas
         self.hwnd = user32.CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,

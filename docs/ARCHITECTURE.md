@@ -51,6 +51,19 @@ MCP client (your AI)
 
 `scale = screen_width / min(screen_width, VM_MCP_SCREENSHOT_MAX_WIDTH)` — exactly 1.0 for screens ≤ 1920 wide.
 
+## Keeping the MCP connection alive
+FastMCP runs plain sync tools directly on the asyncio event loop. Anything that blocks it (a 0.8 s mouse glide, a 15 s
+agent start-up wait) stops the SSE keep-alive pings; clients then drop the stream and often never reconnect. So:
+`toolwrap.wrap()` runs every tool via `asyncio.to_thread` with `VM_MCP_TOOL_TIMEOUT`, `client.ensure_agent()` fails fast
+with a cooldown, `security.Gate` is pure ASGI (no `BaseHTTPMiddleware` around the stream) and logs every stream
+open/close with its reason to the dashboard.
+
+## Dashboard (`/ui/`)
+`activity.store` records each tool call (args redacted/truncated, duration, result summary, returned screenshots saved
+to `activity/img/`) and connection events. `webui/app.py` serves it as plain JSON (`/ui/api/events` polled every 700 ms;
+changes to still-running calls are re-sent so rows complete). Auth = HttpOnly cookie derived from the API key.
+`/ui/api/live` asks the agent for a low-res frame but never starts the agent.
+
 ## Known limits
 Lock screen, UAC secure desktop and Ctrl+Alt+Del can't be captured or driven. Apps running as Administrator ignore
 input from a non-elevated process (run the agent elevated if you need that). The real mouse is shared: if a human

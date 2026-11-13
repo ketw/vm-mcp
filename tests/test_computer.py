@@ -140,6 +140,13 @@ class ActorTests(unittest.TestCase):
         self.ov = FakeOverlay(self.fake.move_abs)
         self.actor = Actor(self.ov)
 
+    def tearDown(self):                               # don't leak the fake Windows modules into other tests
+        import vmmcp.computer as pkg
+        for name in ("inputs", "windows", "uia", "capture", "overlay", "actor"):
+            sys.modules.pop(f"vmmcp.computer.{name}", None)
+            if hasattr(pkg, name):
+                delattr(pkg, name)
+
     def buttons(self):
         return [e for e in self.fake.events if e[0] == "button"]
 

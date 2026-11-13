@@ -4,4 +4,4 @@ Keep this file tiny: the desktop agent (vmmcp.computer.agent) imports the
 package and must not drag in fastmcp / starlette.
 """
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"

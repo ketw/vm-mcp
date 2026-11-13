@@ -209,12 +209,12 @@ class Actor:
 
     # ── perception ───────────────────────────────────────────────────────────
     def screenshot(self, region=None, out_width=None, label_scale=1.0, grid=False, hide_cursor=False,
-                   fmt="auto", quality=85) -> tuple[bytes, dict]:
+                   fmt="auto", quality=78, settle=False) -> tuple[bytes, dict]:
         if hide_cursor:
             self.ov.call_wait(lambda e: (setattr(e, "opacity", 0.0), setattr(e, "opacity_target", 0.0)))
             time.sleep(0.06)
         try:
-            img = capture.grab()
+            img = capture.grab_settled() if settle else capture.grab()
         finally:
             if hide_cursor:
                 self.ov.call(lambda e: e.fade_to(1.0))

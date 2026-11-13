@@ -11,8 +11,9 @@
   software     winget_*, download_file, install_msi
   server_admin server_version / update / restart / log_tail
   power        reboot, reboot_cancel, shutdown
+  knowledge    vm_guide (serves skill/SKILL.md to the AI)
   computer     screenshot, mouse_*, keyboard_*, ui_tree, ... (AI computer use)
 """
 
-from . import (clipboard, computer, files, network, power, processes, registry,  # noqa: F401
+from . import (clipboard, computer, files, knowledge, network, power, processes, registry,  # noqa: F401
                server_admin, services, shell, software, system)

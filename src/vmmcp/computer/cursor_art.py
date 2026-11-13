@@ -105,9 +105,11 @@ class Sprites:
     an affine transform.
     """
 
-    def __init__(self, ui_scale: float = 1.0, base_px: float = 28.0, canvas: int = 96, ss: int = 2):
+    def __init__(self, ui_scale: float = 1.0, base_px: float = 19.0, canvas: int = 96, ss: int = 2):
+        # base_px = visible arrow height at 100% scale. 19 px == the stock Windows 11 arrow.
         self.u = ui_scale
         self.ss = ss
+        fx = base_px / 28.0                                  # effect sizes were designed for 28px; scale them down
         self.canvas = int(round(canvas * ui_scale))
         self.W = self.canvas * ss
         self.hot = int(round(self.canvas / 3))                # hotspot (logical px) inside the canvas
@@ -124,10 +126,10 @@ class Sprites:
         edge_px = max(3, int(round(1.2 * ss * ui_scale)) | 1)
         self.edge = ImageChops.subtract(self.body, self.body.filter(ImageFilter.MinFilter(edge_px)))
 
-        off = (int(round(1.4 * ss * ui_scale)), int(round(3.2 * ss * ui_scale)))
+        off = (int(round(1.0 * fx * ss * ui_scale)), int(round(2.2 * fx * ss * ui_scale)))
         sh = Image.new("L", (self.W, self.W), 0)
         sh.paste(self.body, off)
-        self.shadow = sh.filter(ImageFilter.GaussianBlur(3.0 * ss * ui_scale))
+        self.shadow = sh.filter(ImageFilter.GaussianBlur(max(1.0, 3.0 * fx * ss * ui_scale)))
 
         halo = self.body.filter(ImageFilter.MaxFilter(max(3, int(round(2 * ss * ui_scale)) | 1)))
-        self.glow = halo.filter(ImageFilter.GaussianBlur(5.5 * ss * ui_scale))
+        self.glow = halo.filter(ImageFilter.GaussianBlur(max(1.5, 5.5 * fx * ss * ui_scale)))

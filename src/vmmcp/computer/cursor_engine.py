@@ -60,8 +60,9 @@ class Frame:
 
 
 class CursorEngine:
-    def __init__(self, ui_scale: float = 1.0, on_move: Optional[Callable[[int, int], None]] = None):
-        self.sp = Sprites(ui_scale)
+    def __init__(self, ui_scale: float = 1.0, on_move: Optional[Callable[[int, int], None]] = None,
+                 cursor_px: float = 19.0):
+        self.sp = Sprites(ui_scale, base_px=cursor_px)
         self.u = ui_scale
         self.on_move = on_move                     # called every frame while gliding (moves the real cursor)
 
@@ -213,7 +214,7 @@ class CursorEngine:
                 sx = 0.03 if sx >= 0 else -0.03
         offy = 0.0
         if self.mode == "scroll":
-            offy = -self.scroll_dir * 2.5 * self.u * math.sin(self.clock * 2 * math.pi * 5)
+            offy = -self.scroll_dir * 1.6 * self.u * math.sin(self.clock * 2 * math.pi * 5)
         return tilt, sx, sy, offy
 
     def _frame_key(self):
@@ -263,9 +264,9 @@ class CursorEngine:
             cx, cy = hot + fx, hot + fy
             for r in self._ripples:
                 p = r["t"] / r["dur"]
-                rad = (5.0 + 22.0 * ease_out_cubic(p)) * self.u * ss * (0.8 + 0.2 * r["k"])
+                rad = (3.5 + 13.0 * ease_out_cubic(p)) * self.u * ss * (0.8 + 0.2 * r["k"])
                 a = int(255 * 0.65 * (1 - p) ** 1.6 * op)
-                w = max(1, int(round((2.4 - 1.5 * p) * ss * self.u)))
+                w = max(1, int(round((1.8 - 1.0 * p) * ss * self.u)))
                 col = tuple(int(v) for v in r["color"])
                 d.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=col + (a // 6,), outline=col + (a,), width=w)
             img = Image.alpha_composite(img, layer)

@@ -1,4 +1,4 @@
-# vm-mcp — Remote Windows VM Control + AI Computer Use via MCP  `v3.0`
+# vm-mcp — Remote Windows VM Control + AI Computer Use via MCP  `v3.1`
 
 A Python MCP server that runs on a Windows machine and lets any MCP client (Kiro CLI, Claude Desktop, your local
 AI…) run commands **and see/operate the desktop** with a visible, animated AI cursor.
@@ -7,7 +7,7 @@ AI…) run commands **and see/operate the desktop** with a visible, animated AI 
 
 ```
  AI client ──HTTPS/SSE──▶ MCP server (service, Session 0) ──localhost──▶ Desktop agent (user's desktop)
-                           66 tools                                      ├─ AI cursor overlay (90 fps)
+                           67 tools                                      ├─ AI cursor overlay (90 fps)
                            shell/files/registry/…                        ├─ real mouse + keyboard (SendInput)
                                                                          └─ screenshots / UI tree
 ```
@@ -23,9 +23,26 @@ Add to your MCP client (`~/.kiro/settings/mcp.json` or equivalent):
 ```
 Someone must be logged in on the VM console for computer use (it needs a desktop).
 
+## Dashboard — watch the AI work
+
+Open **`http://<server>:8765/ui/`** and sign in with your API key. You get:
+* **The AI's eyes** — every screenshot it takes, full size, with a marker where it clicked/dragged, a filmstrip of recent
+  screenshots, and a **Live view** toggle that streams the real desktop about once a second.
+* **History** — every tool call: arguments, duration, result, error, and the screenshots it returned. Filter by
+  Computer / Shell / Connection / Errors, search, click any row to pin that moment.
+* **Connection log** — every MCP client connect and **disconnect with the reason** and how long it was up, plus rejected
+  requests (bad key, rate limit). Logs tab shows the server and desktop-agent logs.
+
+## Teach your agent: the skill file
+
+`skills/vm-mcp/SKILL.md` is a ready-made skill/knowledge file (tool choice, the `screenshot_after` rule, coordinates,
+workflows, troubleshooting, token checklist). Also served by the `vm_guide` tool, and the key rules are in the server's
+built-in instructions. For Kiro CLI, copy it to `.kiro/steering/vm-mcp.md` in your workspace (or `~/.kiro/steering/`);
+for Claude-style skills drop the `skills/vm-mcp/` folder into your skills directory.
+
 ## Computer use — 14 tools
 
-Workflow for the AI: **screenshot → act → screenshot**. Every coordinate is a pixel of the latest full screenshot.
+Workflow for the AI: **screenshot once → act → put `screenshot_after=True` on the last action** (returns the settled result in the same call, no extra round-trip). Every coordinate is a pixel of the latest full screenshot.
 
 | Tool | What it does |
 |------|--------------|
@@ -48,7 +65,7 @@ The cursor is soft white and tints by action (blue click, violet right-click, te
 sky scroll, mint typing, lavender wait, coral error). Details: [docs/CURSOR.md](docs/CURSOR.md).
 How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Other tools (52)
+## Other tools (53)
 
 | Family | Tools |
 |---|---|
@@ -61,8 +78,14 @@ How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Network | `net_info` `net_ping` `net_port_scan` `net_connections` `firewall_rule_list` `firewall_rule_add` `firewall_rule_remove` |
 | System | `vm_info` `event_log_read` `env_get` `env_set` `installed_drivers` `toast_notify` |
 | Software | `winget_install` `winget_search` `winget_list` `download_file` `install_msi` |
-| Server | `server_version` `server_update` `server_restart` `server_log_tail` |
+| Server | `server_version` `server_update` `server_restart` `server_log_tail` `vm_guide` |
 | Power | `reboot` `reboot_cancel` `shutdown` |
+
+### Fixed in v3.1: "SSE drops / client stalls during mouse use"
+Tools used to run *on* the server's asyncio loop. A slow tool (or an agent that failed to start, which waited 15 s per
+call) froze the loop, SSE keep-alives stopped, and clients dropped the stream and never reconnected. Now every tool runs
+in a worker thread with a hard timeout, agent start-up fails fast (≤ 8 s, cooldown, log excerpt in the error), localhost
+calls ignore proxy env vars, and the SSE gate is plain ASGI instead of `BaseHTTPMiddleware`.
 
 ### Removed in v3.0
 `screenshot` (old PowerShell version, blank from Session 0), `mouse_*`/`keyboard_*` (pyautogui versions) and all
@@ -125,7 +148,11 @@ Override it with `VM_MCP_UPDATE_URL`. The desktop agent is restarted automatical
 | `VM_MCP_UPDATE_URL` | GitHub master zip | Repo zip used by server_update() |
 | `VM_MCP_AGENT_PORT` | `8788` | Localhost port of the desktop agent |
 | `VM_MCP_SCREENSHOT_MAX_WIDTH` | `1920` | Screenshots wider than this are downscaled |
-| `VM_MCP_AUTO_SCREENSHOT` | `0` | `1` = every mouse/keyboard tool also returns a screenshot |
+| `VM_MCP_AUTO_SCREENSHOT` | `0` | `1` = force a screenshot after every action (agents can also ask per call with `screenshot_after=True`) |
+| `VM_MCP_CURSOR_PX` | `19` | AI cursor height in px at 100% scale (19 = stock Windows 11 arrow; auto-scales with display scaling and pointer size) |
+| `VM_MCP_TOOL_TIMEOUT` | `150` | Seconds before a stuck tool call is abandoned with an error |
+| `VM_MCP_JPEG_QUALITY` | `78` | Screenshot JPEG quality (lower = fewer tokens) |
+| `VM_MCP_ACTIVITY_DIR` | `<install>\activity` | Where the dashboard history + screenshots are stored |
 | `VM_MCP_LOG` | `<install_dir>/vm-mcp.log` | Log file path |
 
 ---

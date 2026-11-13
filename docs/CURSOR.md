@@ -19,10 +19,14 @@ is pressed, ripples on click, flips on double-click, shakes on error, and **chan
 Files: `assets/cursor/cursor.svg` (vector master, hotspot noted in a comment), `cursor-states.png`, `preview.gif`.
 The SVG and the on-screen sprite come from the same geometry (`cursor_art.py`), so they always match.
 
+## Size
+Height matches the stock Windows 11 arrow: **19 px at 100% display scale** (≈16 px wide — your reference shape is a bit
+fatter than the stock arrow). It follows Windows' own scaling: display scale (125%, 150% …) and
+Settings → Accessibility → *Mouse pointer size*. Override the base with `VM_MCP_CURSOR_PX` (e.g. `16` smaller, `24` bigger).
+
 ## Restyle
 * Colours / glow / pose per action: `MODES` in `src/vmmcp/computer/cursor_engine.py`.
 * Shape: `VERTS` (sharp polygon) and `CUTS` (how much each corner is rounded) in `cursor_art.py`.
 * Speed: `glide_duration()` in `motion.py`; bounce: `Spring(omega, zeta)` in `cursor_engine.py`.
-* Size: `Sprites(base_px=28)`; it also scales automatically with Windows display scaling.
 * Then: `python scripts/make_cursor_assets.py` to refresh the SVG/PNG/GIF.
 * Hide it: tool `cursor_control("hide")` (the AI still works, just invisibly).

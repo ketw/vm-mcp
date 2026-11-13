@@ -33,8 +33,18 @@ UPDATE_URL: str = os.environ.get(
 # ── Desktop agent (the process that owns cursor + input + screen capture) ────
 AGENT_PORT: int = int(os.environ.get("VM_MCP_AGENT_PORT", "8788"))
 SCREENSHOT_MAX_WIDTH: int = int(os.environ.get("VM_MCP_SCREENSHOT_MAX_WIDTH", "1920"))
+SCREENSHOT_JPEG_QUALITY: int = int(os.environ.get("VM_MCP_JPEG_QUALITY", "78"))
 # 1 = every mouse/keyboard tool also returns a fresh screenshot (fewer round-trips for vision models)
 AUTO_SCREENSHOT: bool = os.environ.get("VM_MCP_AUTO_SCREENSHOT", "0") == "1"
+
+# Cursor size: visible arrow height in px at 100% scale. 19 = stock Windows 11 arrow. Auto-scaled by the
+# user's display scaling and "Mouse pointer size" setting.
+CURSOR_PX: float = float(os.environ.get("VM_MCP_CURSOR_PX", "19"))
+# Hard ceiling for any single tool call (seconds). A stuck call returns an error instead of hanging the client.
+TOOL_TIMEOUT: int = int(os.environ.get("VM_MCP_TOOL_TIMEOUT", "150"))
+# Where the desktop agent writes its log (server reads it to explain start-up failures).
+AGENT_LOG: Path = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "vm-mcp" / "agent.log"
+ACTIVITY_DIR: Path = Path(os.environ.get("VM_MCP_ACTIVITY_DIR", str(INSTALL_DIR / "activity")))
 
 # ── Full executable paths (SYSTEM has a minimal PATH) ────────────────────────
 PWSH: str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"

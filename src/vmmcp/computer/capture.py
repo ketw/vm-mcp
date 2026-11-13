@@ -10,6 +10,7 @@ Coordinate contract (important, see docs/ARCHITECTURE.md):
 from __future__ import annotations
 
 import io
+import time
 from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
@@ -21,6 +22,26 @@ def grab() -> Image.Image:
     """Whole virtual desktop as RGB, including layered windows (our cursor overlay)."""
     from PIL import ImageGrab
     return ImageGrab.grab(all_screens=True, include_layered_windows=True).convert("RGB")
+
+
+def grab_settled(min_wait: float = 0.18, max_wait: float = 1.6, interval: float = 0.12) -> Image.Image:
+    """Grab once the screen stops changing (menus/pages finished animating) — or after max_wait.
+
+    Used for 'screenshot after an action': the picture then shows the RESULT, not a half-drawn transition.
+    """
+    from PIL import ImageChops, ImageStat
+    t0 = time.perf_counter()
+    time.sleep(min_wait)
+    prev = None
+    while True:
+        img = grab()
+        small = img.resize((192, 108), Image.BILINEAR)
+        if prev is not None and sum(ImageStat.Stat(ImageChops.difference(prev, small)).mean) < 0.8:
+            return img
+        if time.perf_counter() - t0 > max_wait:
+            return img
+        prev = small
+        time.sleep(interval)
 
 
 def _font(size: int):
@@ -94,7 +115,7 @@ def render(
     label_scale: float = 1.0,
     grid: bool = False,
     fmt: str = "auto",                      # auto | png | jpeg
-    quality: int = 85,
+    quality: int = 78,
     min_zoom_width: int = 900,
 ) -> tuple[bytes, dict]:
     full_w, full_h = img.size
@@ -116,7 +137,7 @@ def render(
         img = draw_grid(img, (ox, oy), factor, label_scale)
 
     if fmt == "auto":
-        fmt = "png" if img.width * img.height <= 1_400_000 else "jpeg"
+        fmt = "png" if img.width * img.height <= 400_000 else "jpeg"      # big PNGs bloat the SSE stream
     buf = io.BytesIO()
     if fmt == "jpeg":
         img.save(buf, format="JPEG", quality=quality)

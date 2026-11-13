@@ -32,7 +32,7 @@ sheet.save(os.path.join(OUT, "cursor-states.png"))
 # ── animated demo
 W, H, FPS = 640, 360, 50
 frames = []
-e = CursorEngine(1.5); e.opacity = 1.0; e.place(80, 80)
+e = CursorEngine(2.0); e.opacity = 1.0; e.place(80, 80)   # shown at 2x so it is visible in the README gif
 e.on_move = lambda x, y: None
 script = [("glide", 520, 90), ("click",), ("glide", 330, 250), ("dbl",), ("glide", 120, 280), ("drag", 520, 300),
           ("scroll",), ("type",), ("wait",), ("error",), ("glide", 90, 90)]

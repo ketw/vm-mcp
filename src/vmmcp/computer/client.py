@@ -18,12 +18,16 @@ from pathlib import Path
 from typing import Optional
 
 from .. import VERSION
-from ..config import AGENT_PORT, API_KEY, INSTALL_DIR, SCREENSHOT_MAX_WIDTH
+from ..config import AGENT_LOG, AGENT_PORT, API_KEY, CURSOR_PX, INSTALL_DIR, SCREENSHOT_MAX_WIDTH
 from ..logs import log
 from ..winutil import current_session_id, get_interactive_session_id, launch_in_session
 
 _BASE = f"http://127.0.0.1:{AGENT_PORT}"
 _launch_lock = threading.Lock()
+# Never route localhost traffic through an HTTP(S)_PROXY from the environment.
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_last_failure: Optional[tuple[float, str]] = None       # (when, message) — cooldown for a broken agent
+_COOLDOWN = 20.0
 
 
 class ComputerError(RuntimeError):
@@ -38,7 +42,7 @@ def _post(endpoint: str, payload: dict, timeout: float, auth: bool = True) -> di
     req = urllib.request.Request(f"{_BASE}/{endpoint}", data=json.dumps(payload).encode(), method="POST",
                                  headers={"Content-Type": "application/json", **({"X-Agent-Token": token()} if auth else {})})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _opener.open(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as exc:
         try:
@@ -58,15 +62,28 @@ def _ping() -> Optional[dict]:
 def _spawn(session: int) -> dict:
     exe = Path(sys.executable)
     exe = exe.with_name("pythonw.exe") if exe.with_name("pythonw.exe").exists() else exe   # no console window
-    args = f"-m vmmcp.computer.agent --port {AGENT_PORT} --token {token()}"
+    args = f"-m vmmcp.computer.agent --port {AGENT_PORT} --token {token()} --cursor-px {CURSOR_PX}"
     if current_session_id() == session:                    # server already lives on the user's desktop
         subprocess.Popen([str(exe)] + args.split(), cwd=str(INSTALL_DIR), creationflags=0x08000008)  # NO_WINDOW|DETACHED
         return {"started": True}
     return launch_in_session(str(exe), args, session_id=session, cwd=str(INSTALL_DIR))
 
 
+def _agent_log_tail(n: int = 12) -> str:
+    try:
+        lines = AGENT_LOG.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        return "\n".join(lines[-n:])
+    except OSError:
+        return "(no agent log found)"
+
+
 def ensure_agent() -> dict:
-    """Make sure a current-version agent is running on the active console session."""
+    """Make sure a current-version agent is running on the active console session.
+
+    Must stay FAST: it runs on every computer-use call. Worst case is ~8 s on a cold start, and a broken agent
+    is not retried for 20 s (the error is replayed) so a bad install can never pile up long waits.
+    """
+    global _last_failure
     with _launch_lock:
         session = get_interactive_session_id()
         if session == 0xFFFFFFFF:
@@ -74,24 +91,28 @@ def ensure_agent() -> dict:
         p = _ping()
         if p and p.get("version") == VERSION and p.get("session") == session:
             return p
+        if _last_failure and time.monotonic() - _last_failure[0] < _COOLDOWN and not p:
+            raise ComputerError(_last_failure[1] + "  (retrying automatically in a few seconds)")
         if p:                                              # stale: old version or wrong session
             log.info("restarting desktop agent (have v%s/session %s, want v%s/session %s)",
                      p.get("version"), p.get("session"), VERSION, session)
-            try:
-                _post("shutdown", {}, 2)
-            except Exception:
-                pass
+            stop_agent()
             time.sleep(0.8)
         r = _spawn(session)
         if not r.get("started"):
-            raise ComputerError(f"Could not start the desktop agent: {r.get('error')}")
-        for _ in range(60):
+            msg = f"Could not start the desktop agent: {r.get('error')}"
+            _last_failure = (time.monotonic(), msg)
+            raise ComputerError(msg)
+        for _ in range(32):                                # 8 s
             time.sleep(0.25)
             p = _ping()
             if p:
+                _last_failure = None
                 return p
-        raise ComputerError("Desktop agent started but never answered. See %TEMP%\\vm-mcp-agent.log on the VM "
-                            "(is Pillow installed for the Python that runs the server?).")
+        msg = ("Desktop agent was launched but never answered within 8 s. Agent log:\n" + _agent_log_tail() +
+               f"\n(Full log: {AGENT_LOG}. Common cause: Pillow not installed for {sys.executable}.)")
+        _last_failure = (time.monotonic(), msg)
+        raise ComputerError(msg)
 
 
 def stop_agent() -> bool:
